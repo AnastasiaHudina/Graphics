@@ -1,9 +1,19 @@
+#include <windowsx.h>
+#include <DirectXMath.h>
+
 #include "AppFramework.h"
 #include "Render.h"
 #include <string>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+
+// ImGui Headers - добавляем файлы из папки "imgui"
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+#include "imgui/imgui_impl_dx11.h"
+// Явное объявление для ImGui функции
+extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 constexpr int MAX_STRING_LENGTH = 100;
 
@@ -12,6 +22,13 @@ WCHAR g_AppTitle[MAX_STRING_LENGTH] = L"Lab1 DirectX11";
 WCHAR g_WindowClassName[MAX_STRING_LENGTH] = L"Lab1WindowClass";
 
 Render* g_pGraphics = nullptr;
+
+static bool   g_mouseRightPressed = false;
+static int    g_prevMouseX = 0;
+static int    g_prevMouseY = 0;
+static UINT   g_windowWidth = 800;   // начальные размеры (должны совпадать с CreateWindow)
+static UINT   g_windowHeight = 600;
+static const float g_cameraRotSpeed = DirectX::XM_2PI; // полный оборот за ширину экрана
 
 // Объявления функций
 ATOM RegisterAppWindow(HINSTANCE hInst);
@@ -117,10 +134,54 @@ BOOL CreateAppWindow(HINSTANCE hInst, int showCmd)
 
 LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+        return true;
+
     switch (msg)
     {
     case WM_SIZE:
+        g_windowWidth = LOWORD(lp);
+        g_windowHeight = HIWORD(lp);
         OnWindowSizeChanged(hwnd);
+        break;
+
+    case WM_RBUTTONDOWN:
+        g_mouseRightPressed = true;
+        g_prevMouseX = GET_X_LPARAM(lp);
+        g_prevMouseY = GET_Y_LPARAM(lp);
+        SetCapture(hwnd);               // захватываем мышь, чтобы получать сообщения даже вне окна
+        break;
+
+    case WM_RBUTTONUP:
+        g_mouseRightPressed = false;
+        ReleaseCapture();                // отпускаем мышь
+        break;
+
+    case WM_MOUSEMOVE:
+        if (g_mouseRightPressed && g_pGraphics)
+        {
+            int x = GET_X_LPARAM(lp);
+            int y = GET_Y_LPARAM(lp);
+
+            // Вычисляем относительное перемещение, нормируя на размер окна
+            float dx = static_cast<float>(x - g_prevMouseX) / (g_windowWidth > 0 ? static_cast<float>(g_windowWidth) : 1.0f) * g_cameraRotSpeed;
+            float dy = static_cast<float>(y - g_prevMouseY) / (g_windowHeight > 0 ? static_cast<float>(g_windowHeight) : 1.0f) * g_cameraRotSpeed;
+
+            // Передаём приращения углов в камеру
+            g_pGraphics->RotateAroundTarget(dx, dy);
+
+            g_prevMouseX = x;
+            g_prevMouseY = y;
+        }
+        break;
+
+    case WM_MOUSEWHEEL:
+        if (g_pGraphics)
+        {
+            short delta = GET_WHEEL_DELTA_WPARAM(wp);          
+            float distance = delta / 120.0f * 0.5f;            // множитель для чувствительности
+            g_pGraphics->Zoom(distance);
+        }
         break;
 
     case WM_KEYDOWN:
@@ -152,6 +213,7 @@ LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             case VK_RIGHT: // Движение вправо
                 g_pGraphics->MoveView(0.1f, 0.0f, 0.0f);
                 break;
+
             case VK_ADD: // Приближение
             case 0xBB:
                 g_pGraphics->MoveView(0.0f, 0.0f, 0.1f);
@@ -159,6 +221,9 @@ LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             case VK_SUBTRACT: // Отдаление
             case 0xBD:
                 g_pGraphics->MoveView(0.0f, 0.0f, -0.1f);
+                break;
+            case VK_SPACE: // Вращение кубика
+                g_pGraphics->ToggleAutoRotate();
                 break;
             }
         }

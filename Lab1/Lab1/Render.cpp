@@ -8,11 +8,12 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dxguid.lib")
 
-// Структура вершины
+// Структура вершины с позицией, нормалью, цветом
 struct Vertex
 {
     float pos[3];
-    COLORREF color;
+    float normal[3];
+    float color[4];
 };
 
 // Буферы констант
@@ -26,11 +27,20 @@ struct ViewProjBuffer
     XMMATRIX viewProj;
 };
 
+struct LightBufferData
+{
+    DirectX::XMINT4  lightCount;   // x = количество источников
+    DirectX::XMFLOAT4 lightPos[10];
+    DirectX::XMFLOAT4 lightColor[10];
+    DirectX::XMFLOAT4 ambient;
+};
+
 Render::Render()
-    : m_cameraPos(0.0f, 0.0f, -5.0f)
+    : m_cameraPos(0.0f, 0.0f, -7.0f)
     , m_yawAngle(0.0f)
     , m_pitchAngle(0.0f)
     , m_rotationAngle(0.0f)
+    , m_autoRotate(true)
     , m_hwnd(nullptr)
 {
 }
@@ -51,6 +61,27 @@ HRESULT Render::Initialize(HWND hwnd)
         return hr;
     }
 
+    // Инициализация ImGui
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGui::StyleColorsDark();
+
+    if (!ImGui_ImplWin32_Init(hwnd))
+    {
+        OutputDebugString(L"Ошибка инициализации ImGui Win32\n");
+        ImGui::DestroyContext();
+        return E_FAIL;
+    }
+    if (!ImGui_ImplDX11_Init(m_device.Get(), m_context.Get()))
+    {
+        OutputDebugString(L"Ошибка инициализации ImGui DX11\n");
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        return E_FAIL;
+    }
+    m_imguiInitialized = true;
+
     RECT rect;
     GetClientRect(hwnd, &rect);
     UINT width = rect.right - rect.left;
@@ -70,6 +101,15 @@ HRESULT Render::Initialize(HWND hwnd)
         return hr;
     }
 
+    m_lights.resize(3);
+    // Позиции
+    m_lights[0].position = XMFLOAT4(0.0f, 1.5f, 0.8f, 1.0f);
+    m_lights[0].color = XMFLOAT4(1.0f, 0.0f, 0.0f, 1.0f); // красный
+    m_lights[1].position = XMFLOAT4(0.8f, 1.5f, 0.0f, 1.0f);
+    m_lights[1].color = XMFLOAT4(0.0f, 1.0f, 0.0f, 1.0f); // зелёный
+    m_lights[2].position = XMFLOAT4(0.0f, 1.5f, -0.8f, 1.0f);
+    m_lights[2].color = XMFLOAT4(0.0f, 0.0f, 1.0f, 1.0f); // синий
+
     hr = LoadShaders();
     if (FAILED(hr))
     {
@@ -84,6 +124,13 @@ HRESULT Render::Initialize(HWND hwnd)
 
 void Render::Shutdown()
 {
+    if (m_imguiInitialized)
+    {
+        ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        m_imguiInitialized = false;
+    }
     if (m_context)
     {
         m_context->ClearState();
@@ -252,86 +299,101 @@ HRESULT Render::SetupDepthStencil(UINT width, UINT height)
 
 HRESULT Render::CreateGeometry()
 {
-    // Вершины куба
-    static const Vertex cubeVertices[] =
+    // Нижняя грань (y = -1)
+    Vertex vertices[24] =
     {
-        { {-1.0f,  1.0f, -1.0f}, RGB(255, 20, 147) },   
-        { { 1.0f,  1.0f, -1.0f}, RGB(0, 255, 127) },    
-        { { 1.0f,  1.0f,  1.0f}, RGB(138, 43, 226) },  
-        { {-1.0f,  1.0f,  1.0f}, RGB(255, 215, 0) },  
-        { {-1.0f, -1.0f, -1.0f}, RGB(255, 69, 0) },     
-        { { 1.0f, -1.0f, -1.0f}, RGB(0, 255, 255) }, 
-        { { 1.0f, -1.0f,  1.0f}, RGB(186, 85, 211) },   
-        { {-1.0f, -1.0f,  1.0f}, RGB(50, 205, 50) }     
+        // Нижняя грань (y = -1)
+        { {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+
+        // Верхняя грань (y = 1)
+        { {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+
+        // Правая грань (x = 1)
+        { { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+
+        // Левая грань (x = -1)
+        { {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+
+        // Передняя грань (z = 1)
+        { { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+
+        // Задняя грань (z = -1)
+        { {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} },
+        { {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f} }
     };
 
-    // Индексы треугольников
-    WORD cubeIndices[] =
+    WORD indices[36] =
     {
-        3,1,0, 2,1,3,
-        0,5,4, 1,5,0,
-        3,4,7, 0,4,3,
-        1,6,5, 2,6,1,
-        2,7,6, 3,7,2,
-        6,4,5, 7,4,6,
+        0,2,1, 0,3,2,          // bottom
+        4,6,5, 4,7,6,          // top
+        8,10,9, 8,11,10,       // right
+        12,14,13, 12,15,14,    // left
+        16,18,17, 16,19,18,    // front
+        20,22,21, 20,23,22     // back
     };
 
     // Создание вершинного буфера
     D3D11_BUFFER_DESC vbDesc = {};
-    vbDesc.ByteWidth = sizeof(cubeVertices);
+    vbDesc.ByteWidth = sizeof(vertices);
     vbDesc.Usage = D3D11_USAGE_DEFAULT;
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
     D3D11_SUBRESOURCE_DATA vbData = {};
-    vbData.pSysMem = cubeVertices;
+    vbData.pSysMem = vertices;
 
     HRESULT hr = m_device->CreateBuffer(&vbDesc, &vbData, &m_vertexBuffer);
-    if (FAILED(hr))
-    {
-        OutputDebugString(L"Ошибка создания вершинного буфера\n");
-        return hr;
-    }
+    if (FAILED(hr)) return hr;
 
-    // Создание индексного буфера
+    // Индексный буфер
     D3D11_BUFFER_DESC ibDesc = {};
-    ibDesc.ByteWidth = sizeof(cubeIndices);
+    ibDesc.ByteWidth = sizeof(indices);
     ibDesc.Usage = D3D11_USAGE_DEFAULT;
     ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
 
     D3D11_SUBRESOURCE_DATA ibData = {};
-    ibData.pSysMem = cubeIndices;
+    ibData.pSysMem = indices;
 
     hr = m_device->CreateBuffer(&ibDesc, &ibData, &m_indexBuffer);
-    if (FAILED(hr))
-    {
-        OutputDebugString(L"Ошибка создания индексного буфера\n");
-        return hr;
-    }
+    if (FAILED(hr)) return hr;
 
-    // Константный буфер для world матрицы
+    // Константный буфер для world матрицы 
     D3D11_BUFFER_DESC cbDesc = {};
     cbDesc.ByteWidth = sizeof(WorldMatrixBuffer);
     cbDesc.Usage = D3D11_USAGE_DEFAULT;
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-
     hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_worldBuffer);
-    if (FAILED(hr))
-    {
-        OutputDebugString(L"Ошибка создания world buffer\n");
-        return hr;
-    }
+    if (FAILED(hr)) return hr;
 
-    // Константный буфер для view-projection
+    // Константный буфер для view-proj 
     cbDesc.ByteWidth = sizeof(ViewProjBuffer);
     cbDesc.Usage = D3D11_USAGE_DYNAMIC;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
     hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_viewProjBuffer);
-    if (FAILED(hr))
-    {
-        OutputDebugString(L"Ошибка создания view-proj buffer\n");
-        return hr;
-    }
+    if (FAILED(hr)) return hr;
+
+    // Константный буфер для источников света
+    cbDesc.ByteWidth = sizeof(LightBufferData);
+    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_lightBuffer);
+    if (FAILED(hr)) return hr;
 
     return S_OK;
 }
@@ -422,13 +484,15 @@ HRESULT Render::LoadShaders()
     // Input layout
     D3D11_INPUT_ELEMENT_DESC layout[] =
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 }
     };
+    UINT numElements = ARRAYSIZE(layout);
 
     hr = m_device->CreateInputLayout(
         layout,
-        2,
+        3,
         vsBlob->GetBufferPointer(),
         vsBlob->GetBufferSize(),
         &m_inputLayout
@@ -474,16 +538,45 @@ void Render::SetDebugNames()
 
 void Render::DrawScene()
 {
-    // Маркер для RenderDoc
-    if (m_annotation)
-        m_annotation->BeginEvent(L"DrawScene");
+    if (m_annotation) m_annotation->BeginEvent(L"DrawScene");
 
-    // Очистка буферов (темно-фиолетовый космический фон)
     float clearColor[4] = { 0.1f, 0.05f, 0.2f, 1.0f };
     m_context->ClearRenderTargetView(m_renderTarget.Get(), clearColor);
     m_context->ClearDepthStencilView(m_depthStencil.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
     UpdateTransforms();
+
+    // Установка константных буферов
+    ID3D11Buffer* vsConstantBuffers[] = { m_worldBuffer.Get(), m_viewProjBuffer.Get(), m_lightBuffer.Get() };
+    m_context->VSSetConstantBuffers(0, 3, vsConstantBuffers);
+    m_context->PSSetConstantBuffers(2, 1, m_lightBuffer.GetAddressOf());
+
+    // ===== БЛОК ImGui =====
+    if (m_imguiInitialized)
+    {
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::Begin("Light Intensity");
+        for (int i = 0; i < 3; ++i)
+        {
+            ImGui::Text("Light %d", i);
+            ImGui::SameLine();
+            if (ImGui::Button(("1##l" + std::to_string(i)).c_str())) { m_lights[i].color.w = 1.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button(("10##l" + std::to_string(i)).c_str())) { m_lights[i].color.w = 10.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button(("100##l" + std::to_string(i)).c_str())) { m_lights[i].color.w = 100.0f; }
+            ImGui::Text("Intensity: %.0f", m_lights[i].color.w);
+        }
+        ImGui::End();
+
+        ImGui::Render();
+    }
+    // ===== КОНЕЦ БЛОКА ImGui =====
+
+    
 
     // Настройка pipeline
     UINT stride = sizeof(Vertex);
@@ -496,25 +589,34 @@ void Render::DrawScene()
     m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
     m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
 
-    // Рендеринг
-    if (m_annotation)
-        m_annotation->BeginEvent(L"DrawCube");
+    if (m_annotation) m_annotation->BeginEvent(L"DrawCube");
     m_context->DrawIndexed(36, 0, 0);
-    if (m_annotation)
-        m_annotation->EndEvent();
+    if (m_annotation) m_annotation->EndEvent();
 
-    if (m_annotation)
-        m_annotation->EndEvent();
+    if (m_annotation) m_annotation->EndEvent();
+
+    if (m_imguiInitialized)
+    {
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    }
 
     m_swapChain->Present(1, 0);
 }
 
+void Render::ToggleAutoRotate()
+{
+    m_autoRotate = !m_autoRotate;
+}
+
 void Render::UpdateTransforms()
 {
-    // Обновление угла вращения куба
-    m_rotationAngle += 0.005f;
-    if (m_rotationAngle > XM_2PI)
-        m_rotationAngle -= XM_2PI;
+    // Обновление угла вращения куба если autoRotate включён
+    if (m_autoRotate)
+    {
+        m_rotationAngle += 0.005f;
+        if (m_rotationAngle > XM_2PI)
+            m_rotationAngle -= XM_2PI;
+    }
 
     XMMATRIX world = XMMatrixRotationY(m_rotationAngle);
 
@@ -556,6 +658,22 @@ void Render::UpdateTransforms()
 
     m_context->VSSetConstantBuffers(0, 1, m_worldBuffer.GetAddressOf());
     m_context->VSSetConstantBuffers(1, 1, m_viewProjBuffer.GetAddressOf());
+
+    // Обновление буфера источников света
+    LightBufferData lightData;
+    lightData.lightCount = XMINT4((int)m_lights.size(), 0, 0, 0);
+    for (size_t i = 0; i < m_lights.size(); ++i)
+    {
+        lightData.lightPos[i] = m_lights[i].position;
+        lightData.lightColor[i] = m_lights[i].color;
+    }
+    lightData.ambient = XMFLOAT4(0.1f, 0.1f, 0.1f, 1.0f);
+
+    if (SUCCEEDED(m_context->Map(m_lightBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        memcpy(mapped.pData, &lightData, sizeof(lightData));
+        m_context->Unmap(m_lightBuffer.Get(), 0);
+    }
 }
 
 void Render::HandleResize(HWND hwnd)
@@ -622,3 +740,76 @@ void Render::RotateView(float yaw, float pitch)
     if (m_pitchAngle < -XM_PIDIV2)
         m_pitchAngle = -XM_PIDIV2;
 }
+
+void Render::MoveForward(float distance)
+{
+    // Вычисляем вектор направления взгляда на основе текущих углов
+    XMVECTOR dir = XMVectorSet(
+        cosf(m_pitchAngle) * sinf(m_yawAngle),
+        sinf(m_pitchAngle),
+        cosf(m_pitchAngle) * cosf(m_yawAngle),
+        0.0f
+    );
+
+    XMVECTOR pos = XMLoadFloat3(&m_cameraPos);
+    pos = XMVectorAdd(pos, dir * distance);
+    XMStoreFloat3(&m_cameraPos, pos);
+}
+
+void Render::RotateAroundTarget(float dx, float dy)
+{
+    // Центр сцены (кубик)
+    XMVECTOR target = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+    XMVECTOR pos = XMLoadFloat3(&m_cameraPos);
+
+    // Вектор от центра к камере
+    XMVECTOR toCamera = pos - target;
+    float radius = XMVectorGetX(XMVector3Length(toCamera));
+    if (radius < 0.001f) radius = 0.001f;
+
+    // Направление на камеру
+    XMVECTOR dir = toCamera / radius;
+
+    // Извлекаем сферические углы
+    float yComp = XMVectorGetY(dir);
+    if (yComp > 1.0f) yComp = 1.0f;
+    if (yComp < -1.0f) yComp = -1.0f;
+    float theta = asin(yComp);                // вертикальный угол
+    float phi = atan2(XMVectorGetZ(dir), XMVectorGetX(dir)); // горизонтальный
+
+    // Применяем приращения от мыши
+    phi += dx;
+    theta += dy;
+
+    // Ограничиваем вертикальный угол, чтобы камера не переворачивалась
+    const float maxTheta = XM_PIDIV2 - 0.001f;
+    if (theta > maxTheta) theta = maxTheta;
+    if (theta < -maxTheta) theta = -maxTheta;
+
+    // Вычисляем новую позицию на сфере
+    float cosTheta = cosf(theta);
+    XMVECTOR newPos = target + radius * XMVectorSet(
+        cosTheta * cosf(phi),
+        sinf(theta),
+        cosTheta * sinf(phi),
+        0.0f
+    );
+    XMStoreFloat3(&m_cameraPos, newPos);
+}
+
+void Render::Zoom(float delta)
+{
+    XMVECTOR target = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+    XMVECTOR pos = XMLoadFloat3(&m_cameraPos);
+    XMVECTOR toCamera = pos - target;
+    float radius = XMVectorGetX(XMVector3Length(toCamera));
+
+    radius += delta;               // положительная delta – удаление
+    if (radius < 0.5f) radius = 0.5f; // минимальное расстояние
+
+    XMVECTOR dir = toCamera / XMVector3Length(toCamera);
+    XMVECTOR newPos = target + radius * dir;
+    XMStoreFloat3(&m_cameraPos, newPos);
+
+}
+
