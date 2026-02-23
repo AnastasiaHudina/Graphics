@@ -1,0 +1,42 @@
+Texture2D<float4> HDRTexture : register(t0);
+SamplerState LinearSampler : register(s0);
+
+cbuffer TonemapConstants : register(b0)
+{
+    float exposure;
+    float3 padding;
+}
+
+// Константы Uncharted2
+static const float A = 0.10f;
+static const float B = 0.50f;
+static const float C = 0.10f;
+static const float D = 0.20f;
+static const float E = 0.02f;
+static const float F = 0.30f;
+static const float W = 11.2f;
+
+float3 Uncharted2Tonemap(float3 x)
+{
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    float3 hdrColor = HDRTexture.Sample(LinearSampler, texcoord).rgb;
+    
+    // Exposure
+    float3 color = hdrColor * exposure;
+    
+    // Uncharted2 tonemap
+    float3 mapped = Uncharted2Tonemap(color);
+    
+    // White scale
+    float3 whiteScale = 1.0f / Uncharted2Tonemap(W);
+    mapped *= whiteScale;
+    
+    // Gamma correction
+    mapped = pow(abs(mapped), 1.0f / 2.2f);
+    
+    return float4(mapped, 1.0f);
+}

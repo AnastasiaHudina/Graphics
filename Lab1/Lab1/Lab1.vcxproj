@@ -180,7 +180,11 @@
     </CopyFileToFolders>
   </ItemGroup>
   <ItemGroup>
+    <None Include="Brightness.ps" />
+    <None Include="Copy.ps" />
     <None Include="Lab1.sln" />
+    <None Include="QuadVS.vs" />
+    <None Include="Tonemap.ps" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

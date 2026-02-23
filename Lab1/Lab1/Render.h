@@ -85,4 +85,57 @@ private:
     };
     std::vector<Light> m_lights;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_lightBuffer;
+
+    // HDR render target
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdrTexture;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_hdrRTV;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_hdrSRV;
+
+    // Downsampling chain (для вычисления средней яркости)
+    struct DownsampleLevel {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        UINT width = 0;
+        UINT height = 0;
+    };
+    std::vector<DownsampleLevel> m_downsampleChain;
+
+    // Staging texture для чтения результата 1x1 на CPU
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_luminanceStaging;
+
+    // Fullscreen quad
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_quadVertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_quadIndexBuffer;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> m_quadVS;
+    Microsoft::WRL::ComPtr<ID3D11InputLayout> m_quadInputLayout;
+
+    // Пост-процесс шейдеры
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_brightnessPS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_copyPS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_tonemapPS;
+
+    // Сэмплер с линейной фильтрацией
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> m_linearSampler;
+
+    // Константный буфер для tone mapping (экспозиция)
+    struct TonemapConstants {
+        float exposure;
+        float pad[3];
+    };
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_tonemapCB;
+
+    // Вспомогательные функции
+    HRESULT CreateHDRTarget(UINT width, UINT height);
+    HRESULT CreateDownsampleChain(UINT width, UINT height);
+    HRESULT CreateQuadResources();
+    HRESULT CreatePostprocessShaders();
+    void ComputeAverageLuminance();
+    void ApplyTonemap();
+
+    struct QuadVertex
+    {
+        float x, y, z;  // позиция
+        float u, v;     // текстурные координаты
+    };
 };

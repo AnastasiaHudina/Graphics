@@ -105,5 +105,17 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Lab1.sln" />
+    <None Include="Tonemap.ps">
+      <Filter>Шейдеры</Filter>
+    </None>
+    <None Include="Copy.ps">
+      <Filter>Шейдеры</Filter>
+    </None>
+    <None Include="Brightness.ps">
+      <Filter>Шейдеры</Filter>
+    </None>
+    <None Include="QuadVS.vs">
+      <Filter>Шейдеры</Filter>
+    </None>
   </ItemGroup>
 </Project>
