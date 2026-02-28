@@ -2,6 +2,7 @@
 #include "Render.h"
 #include <d3dcompiler.h>
 #include <string>
+#include <cmath>
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -42,6 +43,10 @@ Render::Render()
     , m_rotationAngle(0.0f)
     , m_autoRotate(true)
     , m_hwnd(nullptr)
+    , m_adaptedLuminance(0.0f)               // начальное значение
+    , m_eyeAdaptationSpeed(0.3f)              // скорость адаптации (можно регулировать)
+    , m_lastFrameTime(std::chrono::steady_clock::now())
+    , m_currentExposure(1.0f)
 {
 }
 
@@ -640,7 +645,25 @@ void Render::DrawScene()
             if (ImGui::Button(("100##l" + std::to_string(i)).c_str())) { m_lights[i].color.w = 100.0f; }
             ImGui::Text("Intensity: %.0f", m_lights[i].color.w);
         }
+
+        ImGui::Separator();
+        ImGui::Text("Adapted Luminance: %.3f", m_adaptedLuminance);
+        ImGui::Text("Exposure: %.3f", m_currentExposure);
         ImGui::End();
+
+        //== ПОЯСНЕНИЕ ==
+        // 
+        //Adapted Luminance – сглаженное во времени значение средней яркости сцены, к которому адаптируется «виртуальный глаз».
+        //При резком изменении освещения (например, переключении интенсивности источника с 1 на 100) это число должно плавно 
+        //расти/падать в течение нескольких секунд, а при статичной сцене оставаться примерно постоянным.
+        //
+        //Exposure – экспозиция, обратно пропорциональная адаптированной яркости. 
+        //Она определяет, насколько усиливается изображение перед тональным отображением: в тёмных сценах экспозиция большая (>1), в ярких – маленькая (<1). 
+        //При изменении яркости экспозиция должна плавно следовать за адаптированной яркостью (увеличиваться при потемнении и уменьшаться при осветлении).
+        //
+        //Тестирование: 
+        //если при тестировании оба параметра изменяются плавно и предсказуемо, а визуально картинка адаптируется без резких скачков, 
+        //значит реализация eye adaptation и тонального отображения выполнена корректно.
 
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -1173,11 +1196,26 @@ void Render::ComputeAverageLuminance()
 
         // Вычисляем среднюю яркость L = exp(logLum) - 1
         float avgLum = expf(logLum) - 1.0f;
+
+        // Защита от слишком малых значений
         if (avgLum < 0.001f) avgLum = 0.001f;
 
-        // Экспозиция по формуле Кравчика
-        float keyValue = 1.03f - 2.0f / (2.0f + log10f(avgLum + 1.0f));
-        float exposure = keyValue / avgLum;
+        // Вычисление времени с предыдущего кадра
+        auto now = std::chrono::steady_clock::now();
+        float deltaTime = std::chrono::duration<float>(now - m_lastFrameTime).count();
+        m_lastFrameTime = now;
+
+        // Обновление адаптированной яркости
+        float expGain = 1.0f - expf(-deltaTime / m_eyeAdaptationSpeed);
+        m_adaptedLuminance += (avgLum - m_adaptedLuminance) * expGain;
+
+        // Защита адаптированной яркости
+        if (m_adaptedLuminance < 0.001f) m_adaptedLuminance = 0.001f;
+
+        // Расчёт экспозиции на основе адаптированной яркости
+        float keyValue = 1.03f - 2.0f / (2.0f + log10f(m_adaptedLuminance + 1.0f));
+        float exposure = keyValue / m_adaptedLuminance;
+        m_currentExposure = exposure;
 
         // Запись в константный буфер
         D3D11_MAPPED_SUBRESOURCE cbMap;

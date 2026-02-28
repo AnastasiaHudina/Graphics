@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <string>
 #include <vector>
+#include <chrono>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -138,4 +139,9 @@ private:
         float x, y, z;  // позиция
         float u, v;     // текстурные координаты
     };
+
+    float m_adaptedLuminance;
+    float m_currentExposure;
+    float m_eyeAdaptationSpeed;
+    std::chrono::steady_clock::time_point m_lastFrameTime;
 };
