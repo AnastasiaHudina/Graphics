@@ -235,7 +235,7 @@ HRESULT Render::SetupDevice(HWND hwnd)
     // Настройка swap chain
     DXGI_SWAP_CHAIN_DESC scDesc = {};
     scDesc.BufferCount = 2;
-    scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scDesc.OutputWindow = hwnd;
     scDesc.SampleDesc.Count = 1;
