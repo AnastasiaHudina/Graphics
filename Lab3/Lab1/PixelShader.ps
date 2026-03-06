@@ -1,0 +1,153 @@
+cbuffer LightBuffer : register(b2)
+{
+    int4 lightCount;
+    float4 lightPos[10];
+    float4 lightColor[10];
+    float4 ambient;
+};
+
+cbuffer MaterialBuffer : register(b3)
+{
+    float4 baseColor;     // rgb in 0..1
+    float4 roughMetalPad; // x=roughness, y=metalness
+};
+
+cbuffer FrameConstants : register(b1)
+{
+    matrix viewProj;
+    matrix invViewProj;
+    float4 cameraPosAndMode; // xyz = camera pos, w = view mode
+};
+
+struct PSIn
+{
+    float4 position : SV_Position;
+    float4 worldPos : POSITION;
+    float3 normal : NORMAL;
+    float4 color : COLOR;
+};
+
+static const float PI = 3.14159265359f;
+
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = clamp(dot(N, H), 0.0f, 1.0f);
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = (NdotH2 * (a2 - 1.0f) + 1.0f);
+    denom = PI * denom * denom;
+    return clamp(a2 / max(denom, 1e-6f), 0.0f, 1e6f);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    NdotV = clamp(NdotV, 0.0f, 1.0f);
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
+    float denom = NdotV * (1.0f - k) + k;
+    return clamp(NdotV / max(denom, 1e-6f), 0.0f, 1.0f);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = clamp(dot(N, V), 0.0f, 1.0f);
+    float NdotL = clamp(dot(N, L), 0.0f, 1.0f);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    return clamp(ggx1 * ggx2, 0.0f, 1.0f);
+}
+
+float3 FresnelSchlick(float cosTheta, float3 F0)
+{
+    cosTheta = clamp(cosTheta, 0.0f, 1.0f);
+    return clamp(F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
+}
+
+float4 main(PSIn input) : SV_Target0
+{
+    float viewMode = cameraPosAndMode.w;
+
+    float3 N = normalize(input.normal);
+    float3 P = input.worldPos.xyz;
+    float3 V = normalize(cameraPosAndMode.xyz - P);
+
+    float roughness = clamp(roughMetalPad.x, 0.0f, 1.0f);
+    float metalness = clamp(roughMetalPad.y, 0.0f, 1.0f);
+    // Avoid singularities at roughness=0
+    roughness = clamp(roughness, 0.04f, 1.0f);
+
+    float3 albedo = clamp(baseColor.rgb, 0.0f, 1.0f);
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metalness);
+
+    float3 Lo = float3(0, 0, 0);
+
+    // Debug modes: берём максимум D/G/F по всем источникам, чтобы визуализация была видна
+    // даже когда первый свет сзади (NdotL <= 0).
+    float debugD = 0.0f;
+    float debugG = 0.0f;
+    float debugFmax = 0.0f;
+
+    [loop]
+    for (int i = 0; i < lightCount.x; i++)
+    {
+        float3 Lvec = lightPos[i].xyz - P;
+        float dist = length(Lvec);
+        float3 L = (dist > 1e-5f) ? (Lvec / dist) : float3(0, 1, 0);
+
+        float attenuation = 1.0f / max(dist * dist, 1e-4f);
+        attenuation = clamp(attenuation, 0.0f, 1.0f);
+
+        float3 radiance = lightColor[i].rgb * lightColor[i].a * attenuation;
+
+        float NdotL = clamp(dot(N, L), 0.0f, 1.0f);
+        float NdotV = clamp(dot(N, V), 0.0f, 1.0f);
+
+        // Для debug-режимов всегда вычисляем D, G, F (для визуализации)
+        float3 H = normalize(V + L);
+        float D = DistributionGGX(N, H, roughness);
+        float G = GeometrySmith(N, V, L, roughness);
+        float3 F = FresnelSchlick(clamp(dot(H, V), 0.0f, 1.0f), F0);
+
+        debugD = max(debugD, D);
+        debugG = max(debugG, G);
+        debugFmax = max(debugFmax, max(F.r, max(F.g, F.b)));
+
+        if (NdotL <= 0.0f || NdotV <= 0.0f)
+            continue;
+
+        float3 numerator = D * G * F;
+        float denom = max(4.0f * NdotV * NdotL, 1e-5f);
+        float3 specular = numerator / denom;
+
+        float3 kS = F;
+        float3 kD = (1.0f - kS) * (1.0f - metalness);
+        float3 diffuse = kD * albedo / PI;
+
+        Lo += (diffuse + specular) * radiance * NdotL;
+    }
+
+    // Debug views (no tonemapping is handled on CPU side by rendering directly to back buffer)
+    if (viewMode > 0.5f && viewMode < 1.5f)
+    {
+        float d = clamp(debugD, 0.0f, 1.0f);
+        return float4(d.xxx, 1.0f);
+    }
+    if (viewMode >= 1.5f && viewMode < 2.5f)
+    {
+        float g = clamp(debugG, 0.0f, 1.0f);
+        return float4(g.xxx, 1.0f);
+    }
+    if (viewMode >= 2.5f)
+    {
+        float f = clamp(debugFmax, 0.0f, 1.0f);
+        return float4(f.xxx, 1.0f);
+    }
+
+    float3 ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+    float3 color = ambientTerm + Lo;
+    color = clamp(color, 0.0f, 1e6f);
+    return float4(color, 1.0f);
+}
