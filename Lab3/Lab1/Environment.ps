@@ -1,0 +1,34 @@
+TextureCube<float4> EnvMap : register(t0);
+SamplerState LinearSampler : register(s0);
+
+cbuffer FrameConstants : register(b1)
+{
+    matrix viewProj;
+    matrix invViewProj;
+    float4 cameraPosAndMode; // xyz = camera pos, w = view mode
+};
+
+float3 Clamp01(float3 v)
+{
+    return clamp(v, 0.0f, 1.0f);
+}
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    // Texcoord (0,0) is top-left; NDC expects y up.
+    float2 ndc;
+    ndc.x = texcoord.x * 2.0f - 1.0f;
+    ndc.y = (1.0f - texcoord.y) * 2.0f - 1.0f;
+
+    // Reconstruct a world-space position on the far plane (z=1)
+    float4 clip = float4(ndc, 1.0f, 1.0f);
+    float4 world = mul(clip, invViewProj);
+    world.xyz /= max(world.w, 1e-6f);
+
+    float3 dir = normalize(world.xyz - cameraPosAndMode.xyz);
+
+    float3 env = EnvMap.Sample(LinearSampler, dir).rgb;
+    env = Clamp01(env);
+    return float4(env, 1.0f);
+}
+
