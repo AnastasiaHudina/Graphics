@@ -1131,12 +1131,13 @@ HRESULT Render::CreateQuadResources()
     hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_quadInputLayout);
     if (FAILED(hr)) return hr;
 
-    // Вершинный буфер (четыре вершины)
+    // Вершинный буфер (четыре вершины). z=1 для environment pass — дальняя плоскость,
+    // чтобы фон не перекрывал геометрию. Для постпроцесса depth не используется.
     QuadVertex vertices[4] = {
-        { -1.0f, -1.0f, 0.0f, 0.0f, 1.0f },
-        {  1.0f, -1.0f, 0.0f, 1.0f, 1.0f },
-        { -1.0f,  1.0f, 0.0f, 0.0f, 0.0f },
-        {  1.0f,  1.0f, 0.0f, 1.0f, 0.0f }
+        { -1.0f, -1.0f, 1.0f, 0.0f, 1.0f },
+        {  1.0f, -1.0f, 1.0f, 1.0f, 1.0f },
+        { -1.0f,  1.0f, 1.0f, 0.0f, 0.0f },
+        {  1.0f,  1.0f, 1.0f, 1.0f, 0.0f }
     };
     D3D11_BUFFER_DESC vbDesc = {};
     vbDesc.ByteWidth = sizeof(vertices);
