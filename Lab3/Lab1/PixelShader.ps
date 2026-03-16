@@ -88,7 +88,7 @@ float4 main(PSIn input) : SV_Target0
     // даже когда первый свет сзади (NdotL <= 0).
     float debugD = 0.0f;
     float debugG = 0.0f;
-    float debugFmax = 0.0f;
+    float3 debugFcolor = float3(0.0f, 0.0f, 0.0f);
 
     [loop]
     for (int i = 0; i < lightCount.x; i++)
@@ -113,7 +113,7 @@ float4 main(PSIn input) : SV_Target0
 
         debugD = max(debugD, D);
         debugG = max(debugG, G);
-        debugFmax = max(debugFmax, max(F.r, max(F.g, F.b)));
+        debugFcolor = max(debugFcolor, F);
 
         if (NdotL <= 0.0f || NdotV <= 0.0f)
             continue;
@@ -142,8 +142,8 @@ float4 main(PSIn input) : SV_Target0
     }
     if (viewMode >= 2.5f)
     {
-        float f = clamp(debugFmax, 0.0f, 1.0f);
-        return float4(f.xxx, 1.0f);
+        float3 f = clamp(debugFcolor, 0.0f, 1.0f);
+        return float4(f, 1.0f);
     }
 
     float3 ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
