@@ -36,6 +36,26 @@ BOOL CreateAppWindow(HINSTANCE hInst, int showCmd);
 LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void OnWindowSizeChanged(HWND hwnd);
 
+static void SetWorkingDirectoryToExeFolder()
+{
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH)
+        return;
+
+    // Обрезаем имя файла, оставляя только папку.
+    for (DWORD i = len; i > 0; --i)
+    {
+        if (exePath[i - 1] == L'\\' || exePath[i - 1] == L'/')
+        {
+            exePath[i - 1] = L'\0';
+            break;
+        }
+    }
+
+    SetCurrentDirectoryW(exePath);
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR lpCmdLine,
@@ -43,6 +63,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 {
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+
+    // Чтобы шейдеры/ресурсы искались рядом с exe даже при запуске "из другой папки".
+    SetWorkingDirectoryToExeFolder();
 
     // Регистрация окна
     if (!RegisterAppWindow(hInstance))

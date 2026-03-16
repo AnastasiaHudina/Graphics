@@ -102,6 +102,7 @@
     <CopyFileToFolders Include="VertexShader.vs">
       <Filter>Шейдеры</Filter>
     </CopyFileToFolders>
+    <CopyFileToFolders Include="Environment.ps" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Lab1.sln" />

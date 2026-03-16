@@ -29,6 +29,10 @@ public:
 
     void ToggleAutoRotate();   // переключение автоматического вращения
 
+    // View / debug modes
+    // 0 = PBR shaded, 1 = NDF, 2 = Geometry, 3 = Fresnel
+    void SetViewMode(int mode);
+
     // Управление камерой
     void MoveView(float dx, float dy, float dz);
     void RotateView(float yaw, float pitch);
@@ -69,6 +73,7 @@ private:
     // Константные буферы
     ComPtr<ID3D11Buffer> m_worldBuffer;
     ComPtr<ID3D11Buffer> m_viewProjBuffer;
+    ComPtr<ID3D11Buffer> m_materialBuffer;
 
     // Параметры камеры
     XMFLOAT3 m_cameraPos;
@@ -86,6 +91,18 @@ private:
     };
     std::vector<Light> m_lights;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_lightBuffer;
+
+    // Material / debug state
+    DirectX::XMFLOAT3 m_baseColor = DirectX::XMFLOAT3(0.9f, 0.7f, 0.2f);
+    float m_roughness = 0.35f;
+    float m_metalness = 0.0f;
+    int m_viewMode = 0;
+
+    // Environment (cubemap) background
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_envCubemap;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_envSRV;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_environmentPS;
+    HRESULT CreateEnvironmentResources();
 
     // HDR render target
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdrTexture;
@@ -133,6 +150,7 @@ private:
     HRESULT CreatePostprocessShaders();
     void ComputeAverageLuminance();
     void ApplyTonemap();
+    void DrawEnvironmentToCurrentTarget();
 
     struct QuadVertex
     {

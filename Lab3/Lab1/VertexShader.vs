@@ -3,9 +3,11 @@ cbuffer WorldMatrix : register(b0)
     matrix world;
 };
 
-cbuffer ViewProjMatrix : register(b1)
+cbuffer FrameConstants : register(b1)
 {
     matrix viewProj;
+    matrix invViewProj;
+    float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
 struct VSIn
