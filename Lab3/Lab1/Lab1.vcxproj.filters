@@ -55,6 +55,9 @@
     <ClInclude Include="imgui\imstb_truetype.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="stb_image.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -103,6 +106,18 @@
       <Filter>Шейдеры</Filter>
     </CopyFileToFolders>
     <CopyFileToFolders Include="Environment.ps" />
+    <CopyFileToFolders Include="CubemapFace.vs">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="EquirectToCubemap.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Irradiance.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="pathway_morning_4k.hdr">
+      <Filter>Файлы ресурсов</Filter>
+    </CopyFileToFolders>
   </ItemGroup>
   <ItemGroup>
     <None Include="Lab1.sln" />
@@ -118,5 +133,11 @@
     <None Include="QuadVS.vs">
       <Filter>Шейдеры</Filter>
     </None>
+    <None Include="pathway_morning_4k.hdr">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="EquirectToCubemap.ps" />
+    <None Include="Irradiance.ps" />
+    <None Include="CubemapFace.vs" />
   </ItemGroup>
 </Project>

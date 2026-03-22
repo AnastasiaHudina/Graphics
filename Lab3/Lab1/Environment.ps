@@ -8,11 +8,6 @@ cbuffer FrameConstants : register(b1)
     float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
-float3 Clamp01(float3 v)
-{
-    return clamp(v, 0.0f, 1.0f);
-}
-
 float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
     // Texcoord (0,0) is top-left; NDC expects y up.
@@ -28,7 +23,7 @@ float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Targ
     float3 dir = normalize(world.xyz - cameraPosAndMode.xyz);
 
     float3 env = EnvMap.Sample(LinearSampler, dir).rgb;
-    env = Clamp01(env);
+    // Не делаем clamp для HDR окружения
+    env = max(env, 0.0f);
     return float4(env, 1.0f);
 }
-

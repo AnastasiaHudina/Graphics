@@ -1,0 +1,78 @@
+// Шейдер для вычисления irradiance map из cubemap
+TextureCube<float4> EnvCubemap : register(t0);
+SamplerState LinearSampler : register(s0);
+
+static const float PI = 3.14159265359;
+
+// Построение ортонормированного базиса по нормали
+void BuildOrthonormalBasis(float3 N, out float3 T, out float3 B)
+{
+    // Выбираем вектор, не параллельный N
+    float3 up = abs(N.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+// Вычисление приближённого интеграла по полусфере
+float4 main(float4 svPos : SV_Position, float3 worldPos : POSITION) : SV_Target
+{
+    // worldPos - направление нормали для текущего пикселя irradiance map
+    float3 N = normalize(worldPos);
+    
+    // Построение касательного базиса
+    float3 T, B;
+    BuildOrthonormalBasis(N, T, B);
+    
+    // Интегрирование по полусфере методом Римана
+    float3 irradiance = float3(0, 0, 0);
+    
+    // Параметры дискретизации - достаточно большие для гладкого результата
+    const uint phiSteps = 64;      // азимут
+    const uint thetaSteps = 32;    // высота
+    
+    float deltaPhi = 2.0 * PI / float(phiSteps);
+    float deltaTheta = 0.5 * PI / float(thetaSteps);
+    
+    float totalWeight = 0.0;
+    
+    [loop]
+    for (uint phi = 0; phi < phiSteps; ++phi)
+    {
+        [loop]
+        for (uint theta = 0; theta < thetaSteps; ++theta)
+        {
+            // Сферические координаты в касательном пространстве
+            float phiAngle = float(phi) * deltaPhi;
+            float thetaAngle = float(theta) * deltaTheta;
+            
+            // Преобразование в декартовы координаты в касательном пространстве
+            float sinTheta = sin(thetaAngle);
+            float cosTheta = cos(thetaAngle);
+            float sinPhi = sin(phiAngle);
+            float cosPhi = cos(phiAngle);
+            
+            float3 tangentSample = float3(
+                sinTheta * cosPhi,
+                sinTheta * sinPhi,
+                cosTheta
+            );
+            
+            // Преобразование из касательного пространства в мировое
+            float3 worldSample = tangentSample.x * T + tangentSample.y * B + tangentSample.z * N;
+            worldSample = normalize(worldSample);
+            
+            // Сэмплирование cubemap
+            float3 sampleColor = EnvCubemap.Sample(LinearSampler, worldSample).rgb;
+            
+            // Вес = cos(theta) * sin(theta) для интеграла по телесному углу
+            float weight = cosTheta * sinTheta;
+            irradiance += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    // Нормализация
+    irradiance = irradiance * PI / max(totalWeight, 1e-6);
+    
+    return float4(irradiance, 1.0);
+}
