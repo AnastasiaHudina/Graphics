@@ -19,6 +19,10 @@ cbuffer FrameConstants : register(b1)
     float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
+// IBL: Irradiance cubemap
+TextureCube<float4> IrradianceMap : register(t1);
+SamplerState LinearSampler : register(s0);
+
 struct PSIn
 {
     float4 position : SV_Position;
@@ -146,7 +150,32 @@ float4 main(PSIn input) : SV_Target0
         return float4(f, 1.0f);
     }
 
-    float3 ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+    // IBL: Ambient diffuse от irradiance map
+    float3 ambientTerm;
+
+    // Fresnel для окружающего освещения (используем нормаль вместо half-вектора)
+    float3 F_ambient = FresnelSchlick(max(dot(N, V), 0.0f), F0);
+    float3 kS_ambient = F_ambient;
+    float3 kD_ambient = (1.0f - kS_ambient) * (1.0f - metalness);
+
+    // Сэмплирование irradiance map по нормали
+    float3 irradiance = IrradianceMap.Sample(LinearSampler, N).rgb;
+    irradiance = clamp(irradiance, 0.0f, 1e6f);
+
+    // Diffuse IBL
+    float3 diffuseIBL = kD_ambient * albedo * irradiance;
+
+    // Если irradiance map недоступна, используем простой ambient
+    // (проверка на нулевое значение)
+    if (dot(irradiance, irradiance) < 1e-6f)
+    {
+        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+    }
+    else
+    {
+        ambientTerm = diffuseIBL;
+    }
+
     float3 color = ambientTerm + Lo;
     color = clamp(color, 0.0f, 1e6f);
     return float4(color, 1.0f);

@@ -104,6 +104,21 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_environmentPS;
     HRESULT CreateEnvironmentResources();
 
+    // IBL: HDRI → Cubemap → Irradiance
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdriTexture;          // исходная HDRI (2D)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_hdriSRV;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdriCubemap;          // конвертированная в cubemap (512x512)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_hdriCubemapSRV;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_irradianceMap;        // irradiance map (32x32)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_irradianceSRV;
+
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_equirectToCubemapPS; // HDRI → cubemap
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_irradiancePS;        // cubemap → irradiance
+
+    HRESULT LoadHDRI(const wchar_t* filename);
+    HRESULT ConvertEquirectToCubemap();
+    HRESULT ComputeIrradianceMap();
+
     // HDR render target
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdrTexture;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_hdrRTV;

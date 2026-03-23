@@ -1,0 +1,37 @@
+// Шейдер для конвертации equirectangular HDRI в cubemap
+Texture2D<float4> EquirectMap : register(t0);
+SamplerState LinearSampler : register(s0);
+
+static const float PI = 3.14159265359;
+
+// Преобразование направления в UV-координаты для equirectangular карты
+float2 DirToEquirectUV(float3 dir)
+{
+    // Нормализуем направление
+    dir = normalize(dir);
+    
+    // Преобразуем в сферические координаты
+    float phi = atan2(dir.z, dir.x);       // азимут [-pi, pi]
+    float theta = asin(dir.y);             // высота [-pi/2, pi/2]
+    
+    // Преобразуем в UV [0, 1]
+    float u = (phi / (2.0 * PI)) + 0.5;
+    float v = (theta / PI) + 0.5;
+    
+    return float2(u, v);
+}
+
+// Вход: мировая позиция вершины quad (передаётся из VS)
+float4 main(float4 svPos : SV_Position, float3 worldPos : POSITION) : SV_Target
+{
+    // worldPos - это направление от центра куба к текущему пикселю на грани
+    float3 dir = normalize(worldPos);
+    
+    // Преобразуем направление в UV-координаты equirectangular карты
+    float2 uv = DirToEquirectUV(dir);
+    
+    // Сэмплируем HDRI
+    float4 color = EquirectMap.Sample(LinearSampler, uv);
+    
+    return color;
+}
