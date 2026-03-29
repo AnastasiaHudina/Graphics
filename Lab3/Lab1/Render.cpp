@@ -153,7 +153,6 @@ HRESULT Render::Initialize(HWND hwnd)
     if (FAILED(hr))
     {
         OutputDebugString(L"Ошибка загрузки HDRI, IBL будет отключен\n");
-        // Продолжаем работу без IBL
     }
     else
     {
@@ -198,7 +197,7 @@ void Render::Shutdown()
     m_hdrSRV.Reset();
 
     // Очистка цепочки downsampling
-    m_downsampleChain.clear(); // автоматически вызовет Reset() для всех ComPtr внутри
+    m_downsampleChain.clear(); 
 
     // Освобождение staging-текстуры
     m_luminanceStaging.Reset();
@@ -700,8 +699,10 @@ void Render::DrawScene()
     m_context->PSSetConstantBuffers(2, 1, m_lightBuffer.GetAddressOf());
     m_context->PSSetConstantBuffers(3, 1, m_materialBuffer.GetAddressOf());
 
-    // Рисуем skybox
-    DrawSkybox();
+    if (debugNoTonemap)
+    {
+        DrawSkybox();
+    }
 
     // Настройка pipeline для куба
     UINT stride = sizeof(Vertex);
@@ -738,6 +739,9 @@ void Render::DrawScene()
         m_context->ClearRenderTargetView(m_renderTarget.Get(), clearColor);
 
         ApplyTonemap();
+
+        m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), m_depthStencil.Get());
+        DrawSkybox();
     }
 
     if (m_annotation) m_annotation->EndEvent(); // End DrawScene
@@ -779,20 +783,6 @@ void Render::DrawScene()
         ImGui::Text("Adapted Luminance: %.3f", m_adaptedLuminance);
         ImGui::Text("Exposure: %.3f", m_currentExposure);
         ImGui::End();
-
-        //== ПОЯСНЕНИЕ ==
-        // 
-        //Adapted Luminance – сглаженное во времени значение средней яркости сцены, к которому адаптируется «виртуальный глаз».
-        //При резком изменении освещения (например, переключении интенсивности источника с 1 на 100) это число должно плавно 
-        //расти/падать в течение нескольких секунд, а при статичной сцене оставаться примерно постоянным.
-        //
-        //Exposure – экспозиция, обратно пропорциональная адаптированной яркости. 
-        //Она определяет, насколько усиливается изображение перед тональным отображением: в тёмных сценах экспозиция большая (>1), в ярких – маленькая (<1). 
-        //При изменении яркости экспозиция должна плавно следовать за адаптированной яркостью (увеличиваться при потемнении и уменьшаться при осветлении).
-        //
-        //Тестирование: 
-        //если при тестировании оба параметра изменяются плавно и предсказуемо, а визуально картинка адаптируется без резких скачков, 
-        //значит реализация eye adaptation и тонального отображения выполнена корректно.
 
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -1189,8 +1179,7 @@ HRESULT Render::CreateQuadResources()
     hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_quadInputLayout);
     if (FAILED(hr)) return hr;
 
-    // Вершинный буфер (четыре вершины). z=1 для environment pass — дальняя плоскость,
-    // чтобы фон не перекрывал геометрию. Для постпроцесса depth не используется.
+    // Вершинный буфер 
     QuadVertex vertices[4] = {
         { -1.0f, -1.0f, 1.0f, 0.0f, 1.0f },
         {  1.0f, -1.0f, 1.0f, 1.0f, 1.0f },
@@ -1251,9 +1240,9 @@ HRESULT Render::CreatePostprocessShaders()
     // Линейный сэмплер
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -1312,7 +1301,7 @@ void Render::ComputeAverageLuminance()
         m_context->PSSetShaderResources(0, 1, &nullSRV);
     }
 
-    // Шаг 2: последовательное уменьшение (копирование с линейной фильтрацией)
+    // Шаг 2: последовательное уменьшение
     for (size_t i = 1; i < m_downsampleChain.size(); ++i)
     {
         auto& src = m_downsampleChain[i - 1];
@@ -1392,14 +1381,12 @@ void Render::ComputeAverageLuminance()
 
 void Render::ApplyTonemap()
 {
-    // Предполагается, что back buffer уже установлен как render target
     m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
     m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
     m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
     m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
     m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
 
-    // Создаём состояние растеризатора без отсечения граней
     D3D11_RASTERIZER_DESC rsDesc = {};
     rsDesc.FillMode = D3D11_FILL_SOLID;
     rsDesc.CullMode = D3D11_CULL_NONE;
@@ -1423,7 +1410,6 @@ void Render::ApplyTonemap()
 
 HRESULT Render::CreateEnvironmentResources()
 {
-    // Create a tiny procedural cubemap (6 faces) to demonstrate cubemap usage without external assets.
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = 16;
     desc.Height = 16;
@@ -1442,7 +1428,6 @@ HRESULT Render::CreateEnvironmentResources()
         return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
     };
 
-    // Simple gradient per face
     const uint32_t faceColors[6] = {
         pack(255, 120, 120, 255), // +X
         pack(120, 255, 120, 255), // -X
@@ -1660,7 +1645,7 @@ HRESULT Render::ConvertEquirectToCubemap()
     hr = m_device->CreateBuffer(&cbDesc, nullptr, &viewProjCB);
     if (FAILED(hr)) return hr;
 
-    // Камеры для каждой грани cubemap (используем LookToLH с направлением)
+    // Камеры для каждой грани cubemap 
     XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
 
     XMVECTOR directions[6] = {
@@ -1689,13 +1674,13 @@ HRESULT Render::ConvertEquirectToCubemap()
     const float height = width;
     XMMATRIX proj = XMMatrixPerspectiveLH(2.0f * width, 2.0f * height, nearp, farp);
 
-    // Создание quad геометрии (покрывает весь viewport в мировых координатах)
+    // Создание quad геометрии 
     struct CubemapVertex {
         float pos[3];
         float uv[2];
     };
 
-    // Quad перед камерой на расстоянии 0.5 (между near=0.1 и far=10)
+    // Quad перед камерой на расстоянии 0.5 
     CubemapVertex quadVerts[4] = {
         { {-0.5f, -0.5f, 0.5f}, {0, 1} },
         { {-0.5f,  0.5f, 0.5f}, {0, 0} },
@@ -1707,7 +1692,7 @@ HRESULT Render::ConvertEquirectToCubemap()
 
     D3D11_BUFFER_DESC vbDesc{};
     vbDesc.ByteWidth = sizeof(quadVerts);
-    vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
     D3D11_SUBRESOURCE_DATA vbData{};
@@ -1732,6 +1717,34 @@ HRESULT Render::ConvertEquirectToCubemap()
     // Рендеринг каждой грани
     for (UINT face = 0; face < 6; ++face)
     {
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(ups[face], directions[face]));
+        XMVECTOR up = XMVector3Normalize(XMVector3Cross(directions[face], right));
+
+        XMVECTOR faceCorners[4] = {
+            XMVector3Normalize(directions[face] - right - up),
+            XMVector3Normalize(directions[face] - right + up),
+            XMVector3Normalize(directions[face] + right + up),
+            XMVector3Normalize(directions[face] + right - up)
+        };
+
+        CubemapVertex faceVerts[4] = {
+            { { 0.0f, 0.0f, 0.0f }, {0, 1} },
+            { { 0.0f, 0.0f, 0.0f }, {0, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 1} }
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            XMFLOAT3 pos;
+            XMStoreFloat3(&pos, faceCorners[i]);
+            faceVerts[i].pos[0] = pos.x;
+            faceVerts[i].pos[1] = pos.y;
+            faceVerts[i].pos[2] = pos.z;
+        }
+
+        m_context->UpdateSubresource(quadVB.Get(), 0, nullptr, faceVerts, 0, 0);
+
         // Создание RTV для текущей грани
         D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
         rtvDesc.Format = desc.Format;
@@ -1772,6 +1785,16 @@ HRESULT Render::ConvertEquirectToCubemap()
         float clearColor[4] = { 0, 0, 0, 1 };
         m_context->ClearRenderTargetView(rtv.Get(), clearColor);
 
+        // Настройка rasterizer state
+        D3D11_RASTERIZER_DESC rsDesc = {};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = FALSE;
+        rsDesc.DepthClipEnable = TRUE;
+        ComPtr<ID3D11RasterizerState> rsState;
+        m_device->CreateRasterizerState(&rsDesc, &rsState);
+        m_context->RSSetState(rsState.Get());
+
         // Рендеринг quad
         m_context->IASetInputLayout(cubemapInputLayout.Get());
         UINT stride = sizeof(CubemapVertex);
@@ -1794,7 +1817,22 @@ HRESULT Render::ConvertEquirectToCubemap()
         m_context->PSSetShaderResources(0, 1, &nullSRV);
     }
 
-    // Восстановление состояния рендеринга будет выполнено при следующем DrawScene
+    // Восстановление rasterizer state
+    m_context->RSSetState(nullptr);
+
+    // Восстановление render targets
+    m_context->OMSetRenderTargets(1, m_hdrRTV.GetAddressOf(), m_depthStencil.Get());
+
+    // Восстановление viewport к размерам экрана
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)(rect.right - rect.left);
+    vp.Height = (float)(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
+
     return S_OK;
 }
 
@@ -1902,7 +1940,7 @@ HRESULT Render::ComputeIrradianceMap()
 
     D3D11_BUFFER_DESC vbDesc{};
     vbDesc.ByteWidth = sizeof(quadVerts);
-    vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
     D3D11_SUBRESOURCE_DATA vbData{};
@@ -1955,6 +1993,34 @@ HRESULT Render::ComputeIrradianceMap()
     // Рендеринг каждой грани
     for (UINT face = 0; face < 6; ++face)
     {
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(ups[face], directions[face]));
+        XMVECTOR up = XMVector3Normalize(XMVector3Cross(directions[face], right));
+
+        XMVECTOR faceCorners[4] = {
+            XMVector3Normalize(directions[face] - right - up),
+            XMVector3Normalize(directions[face] - right + up),
+            XMVector3Normalize(directions[face] + right + up),
+            XMVector3Normalize(directions[face] + right - up)
+        };
+
+        CubemapVertex faceVerts[4] = {
+            { { 0.0f, 0.0f, 0.0f }, {0, 1} },
+            { { 0.0f, 0.0f, 0.0f }, {0, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 1} }
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            XMFLOAT3 pos;
+            XMStoreFloat3(&pos, faceCorners[i]);
+            faceVerts[i].pos[0] = pos.x;
+            faceVerts[i].pos[1] = pos.y;
+            faceVerts[i].pos[2] = pos.z;
+        }
+
+        m_context->UpdateSubresource(quadVB.Get(), 0, nullptr, faceVerts, 0, 0);
+
         D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
         rtvDesc.Format = desc.Format;
         rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
@@ -1989,6 +2055,16 @@ HRESULT Render::ComputeIrradianceMap()
         float clearColor[4] = { 0, 0, 0, 1 };
         m_context->ClearRenderTargetView(rtv.Get(), clearColor);
 
+        // Настройка rasterizer state
+        D3D11_RASTERIZER_DESC rsDesc = {};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = FALSE;
+        rsDesc.DepthClipEnable = TRUE;
+        ComPtr<ID3D11RasterizerState> rsState;
+        m_device->CreateRasterizerState(&rsDesc, &rsState);
+        m_context->RSSetState(rsState.Get());
+
         m_context->IASetInputLayout(cubemapInputLayout.Get());
         UINT stride = sizeof(CubemapVertex);
         UINT offset = 0;
@@ -2008,6 +2084,22 @@ HRESULT Render::ComputeIrradianceMap()
         ID3D11ShaderResourceView* nullSRV = nullptr;
         m_context->PSSetShaderResources(0, 1, &nullSRV);
     }
+
+    // Восстановление rasterizer state
+    m_context->RSSetState(nullptr);
+
+    // Восстановление render targets
+    m_context->OMSetRenderTargets(1, m_hdrRTV.GetAddressOf(), m_depthStencil.Get());
+
+    // Восстановление viewport к размерам экрана
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)(rect.right - rect.left);
+    vp.Height = (float)(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
 
     return S_OK;
 }

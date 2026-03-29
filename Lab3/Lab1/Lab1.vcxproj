@@ -191,9 +191,10 @@
     <None Include="CubemapFace.vs" />
     <None Include="EquirectToCubemap.ps" />
     <None Include="Irradiance.ps" />
-    <None Include="Lab1.sln" />
     <None Include="pathway_morning_4k.hdr" />
     <None Include="QuadVS.vs" />
+    <None Include="Skybox.ps" />
+    <None Include="Skybox.vs" />
     <None Include="Tonemap.ps" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
@@ -211,5 +212,7 @@
     <Copy SourceFiles="$(ProjectDir)EquirectToCubemap.ps" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(ProjectDir)Irradiance.ps" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(ProjectDir)pathway_morning_4k.hdr" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)Skybox.ps" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)Skybox.vs" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

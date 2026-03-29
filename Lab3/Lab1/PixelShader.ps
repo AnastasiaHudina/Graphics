@@ -69,6 +69,13 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
     return clamp(F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
 }
 
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    cosTheta = clamp(cosTheta, 0.0f, 1.0f);
+    float3 maxReflection = max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0);
+    return clamp(F0 + (maxReflection - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
+}
+
 float4 main(PSIn input) : SV_Target0
 {
     float viewMode = cameraPosAndMode.w;
@@ -153,8 +160,8 @@ float4 main(PSIn input) : SV_Target0
     // IBL: Ambient diffuse от irradiance map
     float3 ambientTerm;
 
-    // Fresnel для окружающего освещения (используем нормаль вместо half-вектора)
-    float3 F_ambient = FresnelSchlick(max(dot(N, V), 0.0f), F0);
+    // Fresnel для окружающего освещения с учётом roughness
+    float3 F_ambient = FresnelSchlickRoughness(max(dot(N, V), 0.0f), F0, roughness);
     float3 kS_ambient = F_ambient;
     float3 kD_ambient = (1.0f - kS_ambient) * (1.0f - metalness);
 

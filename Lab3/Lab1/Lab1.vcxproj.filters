@@ -105,7 +105,30 @@
     <CopyFileToFolders Include="VertexShader.vs">
       <Filter>Шейдеры</Filter>
     </CopyFileToFolders>
-    <CopyFileToFolders Include="Environment.ps" />
+    <CopyFileToFolders Include="Environment.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Tonemap.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Copy.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Brightness.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="QuadVS.vs">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="pathway_morning_4k.hdr">
+      <Filter>Файлы ресурсов</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Skybox.ps">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Skybox.vs">
+      <Filter>Шейдеры</Filter>
+    </CopyFileToFolders>
     <CopyFileToFolders Include="CubemapFace.vs">
       <Filter>Шейдеры</Filter>
     </CopyFileToFolders>
@@ -115,29 +138,5 @@
     <CopyFileToFolders Include="Irradiance.ps">
       <Filter>Шейдеры</Filter>
     </CopyFileToFolders>
-    <CopyFileToFolders Include="pathway_morning_4k.hdr">
-      <Filter>Файлы ресурсов</Filter>
-    </CopyFileToFolders>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="Lab1.sln" />
-    <None Include="Tonemap.ps">
-      <Filter>Шейдеры</Filter>
-    </None>
-    <None Include="Copy.ps">
-      <Filter>Шейдеры</Filter>
-    </None>
-    <None Include="Brightness.ps">
-      <Filter>Шейдеры</Filter>
-    </None>
-    <None Include="QuadVS.vs">
-      <Filter>Шейдеры</Filter>
-    </None>
-    <None Include="pathway_morning_4k.hdr">
-      <Filter>Файлы ресурсов</Filter>
-    </None>
-    <None Include="EquirectToCubemap.ps" />
-    <None Include="Irradiance.ps" />
-    <None Include="CubemapFace.vs" />
   </ItemGroup>
 </Project>

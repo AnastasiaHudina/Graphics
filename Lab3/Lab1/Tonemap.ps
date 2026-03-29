@@ -35,8 +35,5 @@ float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Targ
     float3 whiteScale = 1.0f / Uncharted2Tonemap(W);
     mapped *= whiteScale;
     
-    // Gamma correction
-    mapped = pow(abs(mapped), 1.0f / 2.2f);
-    
     return float4(mapped, 1.0f);
 }
