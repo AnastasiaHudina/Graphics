@@ -172,6 +172,13 @@ HRESULT Render::Initialize(HWND hwnd)
         }
     }
 
+    // Создание skybox
+    hr = CreateSkyboxResources();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания skybox, будет использован fallback\n");
+    }
+
     return S_OK;
 }
 
@@ -223,6 +230,13 @@ void Render::Shutdown()
     m_irradianceSRV.Reset();
     m_equirectToCubemapPS.Reset();
     m_irradiancePS.Reset();
+
+    // Skybox
+    m_skyboxVertexBuffer.Reset();
+    m_skyboxIndexBuffer.Reset();
+    m_skyboxVS.Reset();
+    m_skyboxPS.Reset();
+    m_skyboxInputLayout.Reset();
 
     if (m_context)
     {
@@ -686,8 +700,8 @@ void Render::DrawScene()
     m_context->PSSetConstantBuffers(2, 1, m_lightBuffer.GetAddressOf());
     m_context->PSSetConstantBuffers(3, 1, m_materialBuffer.GetAddressOf());
 
-    // Environment background
-    DrawEnvironmentToCurrentTarget();
+    // Рисуем skybox
+    DrawSkybox();
 
     // Настройка pipeline для куба
     UINT stride = sizeof(Vertex);
@@ -1646,28 +1660,34 @@ HRESULT Render::ConvertEquirectToCubemap()
     hr = m_device->CreateBuffer(&cbDesc, nullptr, &viewProjCB);
     if (FAILED(hr)) return hr;
 
-    // Определение камер для каждой грани cubemap
-    // +X, -X, +Y, -Y, +Z, -Z
-    XMVECTOR targets[6] = {
-        XMVectorSet(1, 0, 0, 0),   // +X
-        XMVectorSet(-1, 0, 0, 0),  // -X
-        XMVectorSet(0, 1, 0, 0),   // +Y
-        XMVectorSet(0, -1, 0, 0),  // -Y
-        XMVectorSet(0, 0, 1, 0),   // +Z
-        XMVectorSet(0, 0, -1, 0)   // -Z
+    // Камеры для каждой грани cubemap (используем LookToLH с направлением)
+    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
+
+    XMVECTOR directions[6] = {
+        XMVectorSet(1, 0, 0, 0),    // +X
+        XMVectorSet(-1, 0, 0, 0),   // -X
+        XMVectorSet(0, 1, 0, 0),    // +Y
+        XMVectorSet(0, -1, 0, 0),   // -Y
+        XMVectorSet(0, 0, 1, 0),    // +Z
+        XMVectorSet(0, 0, -1, 0)    // -Z
     };
 
     XMVECTOR ups[6] = {
-        XMVectorSet(0, 1, 0, 0),   // +X
-        XMVectorSet(0, 1, 0, 0),   // -X
-        XMVectorSet(0, 0, -1, 0),  // +Y (up смотрит в -Z)
-        XMVectorSet(0, 0, 1, 0),   // -Y (up смотрит в +Z)
-        XMVectorSet(0, 1, 0, 0),   // +Z
-        XMVectorSet(0, 1, 0, 0)    // -Z
+        XMVectorSet(0, 1, 0, 0),    // +X
+        XMVectorSet(0, 1, 0, 0),    // -X
+        XMVectorSet(0, 0, -1, 0),   // +Y
+        XMVectorSet(0, 0, 1, 0),    // -Y
+        XMVectorSet(0, 1, 0, 0),    // +Z
+        XMVectorSet(0, 1, 0, 0)     // -Z
     };
 
-    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.1f, 10.0f); // 90 градусов FOV
+    // Создание проекционной матрицы (90 градусов FOV)
+    const float nearp = 0.1f;
+    const float farp = 10.0f;
+    const float fov = XM_PIDIV2;
+    const float width = nearp / tanf(fov / 2.0f);
+    const float height = width;
+    XMMATRIX proj = XMMatrixPerspectiveLH(2.0f * width, 2.0f * height, nearp, farp);
 
     // Создание quad геометрии (покрывает весь viewport в мировых координатах)
     struct CubemapVertex {
@@ -1724,8 +1744,8 @@ HRESULT Render::ConvertEquirectToCubemap()
         hr = m_device->CreateRenderTargetView(m_hdriCubemap.Get(), &rtvDesc, &rtv);
         if (FAILED(hr)) return hr;
 
-        // Настройка view матрицы для грани
-        XMMATRIX view = XMMatrixLookAtLH(eye, targets[face], ups[face]);
+        // Настройка view матрицы для грани (используем LookToLH)
+        XMMATRIX view = XMMatrixLookToLH(eye, directions[face], ups[face]);
         XMMATRIX viewProj = XMMatrixTranspose(view * proj);
 
         // Обновление константного буфера
@@ -1905,7 +1925,9 @@ HRESULT Render::ComputeIrradianceMap()
     if (FAILED(hr)) return hr;
 
     // Camera setup для каждой грани
-    XMVECTOR targets[6] = {
+    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
+
+    XMVECTOR directions[6] = {
         XMVectorSet(1, 0, 0, 0),
         XMVectorSet(-1, 0, 0, 0),
         XMVectorSet(0, 1, 0, 0),
@@ -1923,8 +1945,12 @@ HRESULT Render::ComputeIrradianceMap()
         XMVectorSet(0, 1, 0, 0)
     };
 
-    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.1f, 10.0f);
+    const float nearp = 0.1f;
+    const float farp = 10.0f;
+    const float fov = XM_PIDIV2;
+    const float width = nearp / tanf(fov / 2.0f);
+    const float height = width;
+    XMMATRIX proj = XMMatrixPerspectiveLH(2.0f * width, 2.0f * height, nearp, farp);
 
     // Рендеринг каждой грани
     for (UINT face = 0; face < 6; ++face)
@@ -1940,7 +1966,7 @@ HRESULT Render::ComputeIrradianceMap()
         hr = m_device->CreateRenderTargetView(m_irradianceMap.Get(), &rtvDesc, &rtv);
         if (FAILED(hr)) return hr;
 
-        XMMATRIX view = XMMatrixLookAtLH(eye, targets[face], ups[face]);
+        XMMATRIX view = XMMatrixLookToLH(eye, directions[face], ups[face]);
         XMMATRIX viewProj = XMMatrixTranspose(view * proj);
 
         D3D11_MAPPED_SUBRESOURCE mapped;
@@ -1984,6 +2010,200 @@ HRESULT Render::ComputeIrradianceMap()
     }
 
     return S_OK;
+}
+
+HRESULT Render::CreateSkyboxResources()
+{
+    // Создание геометрии сферы для skybox (используем ту же геометрию что и для PBR объекта)
+    const int slices = 64;
+    const int stacks = 32;
+    const float radius = 1.0f;
+
+    std::vector<Vertex> vertices;
+    std::vector<WORD> indices;
+    vertices.reserve((stacks + 1) * (slices + 1));
+    indices.reserve(stacks * slices * 6);
+
+    for (int stack = 0; stack <= stacks; ++stack)
+    {
+        float v = (float)stack / (float)stacks;
+        float phi = v * XM_PI;
+        float y = cosf(phi);
+        float r = sinf(phi);
+
+        for (int slice = 0; slice <= slices; ++slice)
+        {
+            float u = (float)slice / (float)slices;
+            float theta = u * XM_2PI;
+
+            float x = r * cosf(theta);
+            float z = r * sinf(theta);
+
+            Vertex vert{};
+            vert.pos[0] = radius * x;
+            vert.pos[1] = radius * y;
+            vert.pos[2] = radius * z;
+
+            vert.normal[0] = x;
+            vert.normal[1] = y;
+            vert.normal[2] = z;
+
+            vert.color[0] = 1.0f;
+            vert.color[1] = 1.0f;
+            vert.color[2] = 1.0f;
+            vert.color[3] = 1.0f;
+
+            vertices.push_back(vert);
+        }
+    }
+
+    auto idx = [slices](int stack, int slice) -> WORD {
+        return (WORD)(stack * (slices + 1) + slice);
+    };
+
+    for (int stack = 0; stack < stacks; ++stack)
+    {
+        for (int slice = 0; slice < slices; ++slice)
+        {
+            WORD i0 = idx(stack, slice);
+            WORD i1 = idx(stack + 1, slice);
+            WORD i2 = idx(stack + 1, slice + 1);
+            WORD i3 = idx(stack, slice + 1);
+
+            indices.push_back(i0); indices.push_back(i1); indices.push_back(i2);
+            indices.push_back(i0); indices.push_back(i2); indices.push_back(i3);
+        }
+    }
+
+    m_skyboxIndexCount = (UINT)indices.size();
+
+    // Вершинный буфер
+    D3D11_BUFFER_DESC vbDesc = {};
+    vbDesc.ByteWidth = (UINT)(sizeof(Vertex) * vertices.size());
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
+    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA vbData = {};
+    vbData.pSysMem = vertices.data();
+
+    HRESULT hr = m_device->CreateBuffer(&vbDesc, &vbData, &m_skyboxVertexBuffer);
+    if (FAILED(hr)) return hr;
+
+    // Индексный буфер
+    D3D11_BUFFER_DESC ibDesc = {};
+    ibDesc.ByteWidth = (UINT)(sizeof(WORD) * indices.size());
+    ibDesc.Usage = D3D11_USAGE_DEFAULT;
+    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA ibData = {};
+    ibData.pSysMem = indices.data();
+
+    hr = m_device->CreateBuffer(&ibDesc, &ibData, &m_skyboxIndexBuffer);
+    if (FAILED(hr)) return hr;
+
+    // Компиляция шейдеров
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+    #ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+    #endif
+
+    ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
+
+    // Вершинный шейдер
+    hr = D3DCompileFromFile(L"Skybox.vs", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "vs_5_0", flags, 0, &vsBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции Skybox.vs\n");
+        return hr;
+    }
+
+    hr = m_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &m_skyboxVS);
+    if (FAILED(hr)) return hr;
+
+    // Пиксельный шейдер
+    hr = D3DCompileFromFile(L"Skybox.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции Skybox.ps\n");
+        return hr;
+    }
+
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_skyboxPS);
+    if (FAILED(hr)) return hr;
+
+    // Input layout (такой же как для основной геометрии)
+    D3D11_INPUT_ELEMENT_DESC layout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+
+    hr = m_device->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_skyboxInputLayout);
+    if (FAILED(hr)) return hr;
+
+    return S_OK;
+}
+
+void Render::DrawSkybox()
+{
+    if (!m_skyboxVS || !m_skyboxPS) return;
+
+    // Используем HDRI cubemap если доступен, иначе процедурный
+    ID3D11ShaderResourceView* envToUse = m_hdriCubemapSRV ? m_hdriCubemapSRV.Get() : m_envSRV.Get();
+    if (!envToUse) return;
+
+    // Отключаем depth write для skybox (но оставляем depth test)
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = TRUE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; // не пишем в depth
+    dsDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    dsDesc.StencilEnable = FALSE;
+
+    ComPtr<ID3D11DepthStencilState> dsState;
+    m_device->CreateDepthStencilState(&dsDesc, &dsState);
+    m_context->OMSetDepthStencilState(dsState.Get(), 0);
+
+    // Отключаем culling
+    D3D11_RASTERIZER_DESC rsDesc = {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_NONE;
+    rsDesc.FrontCounterClockwise = FALSE;
+    rsDesc.DepthClipEnable = TRUE;
+
+    ComPtr<ID3D11RasterizerState> rsState;
+    m_device->CreateRasterizerState(&rsDesc, &rsState);
+    m_context->RSSetState(rsState.Get());
+
+    // Настройка pipeline
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_skyboxVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetIndexBuffer(m_skyboxIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_context->IASetInputLayout(m_skyboxInputLayout.Get());
+
+    m_context->VSSetShader(m_skyboxVS.Get(), nullptr, 0);
+    m_context->VSSetConstantBuffers(0, 1, m_worldBuffer.GetAddressOf());
+    m_context->VSSetConstantBuffers(1, 1, m_viewProjBuffer.GetAddressOf());
+
+    m_context->PSSetShader(m_skyboxPS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, &envToUse);
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+
+    m_context->DrawIndexed(m_skyboxIndexCount, 0, 0);
+
+    // Очистка
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    m_context->PSSetShaderResources(0, 1, &nullSRV);
+
+    // Восстанавливаем нормальное depth state
+    m_context->OMSetDepthStencilState(nullptr, 0);
+    m_context->RSSetState(nullptr);
 }
 
 

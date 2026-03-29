@@ -119,6 +119,17 @@ private:
     HRESULT ConvertEquirectToCubemap();
     HRESULT ComputeIrradianceMap();
 
+    // Skybox
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_skyboxVertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_skyboxIndexBuffer;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> m_skyboxVS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_skyboxPS;
+    Microsoft::WRL::ComPtr<ID3D11InputLayout> m_skyboxInputLayout;
+    UINT m_skyboxIndexCount;
+
+    HRESULT CreateSkyboxResources();
+    void DrawSkybox();
+
     // HDR render target
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_hdrTexture;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_hdrRTV;
