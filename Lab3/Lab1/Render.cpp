@@ -699,10 +699,7 @@ void Render::DrawScene()
     m_context->PSSetConstantBuffers(2, 1, m_lightBuffer.GetAddressOf());
     m_context->PSSetConstantBuffers(3, 1, m_materialBuffer.GetAddressOf());
 
-    if (debugNoTonemap)
-    {
-        DrawSkybox();
-    }
+    DrawSkybox();
 
     // Настройка pipeline для куба
     UINT stride = sizeof(Vertex);
@@ -734,14 +731,7 @@ void Render::DrawScene()
         // Пост-обработка: вычисление яркости и tone mapping
         ComputeAverageLuminance();
 
-        // Переключение на back buffer
-        m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), nullptr);
-        m_context->ClearRenderTargetView(m_renderTarget.Get(), clearColor);
-
         ApplyTonemap();
-
-        m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), m_depthStencil.Get());
-        DrawSkybox();
     }
 
     if (m_annotation) m_annotation->EndEvent(); // End DrawScene
@@ -1072,20 +1062,21 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
 {
     m_downsampleChain.clear();
 
-    UINT w = width, h = height;
+    UINT size = min(width, height);
 
-    // Уровень 0 – того же размера, для хранения яркости
+    // Квадратные текстуры от min(w,h) до 1x1, формат RGBA32F (как в референсе)
+    while (size >= 1)
     {
         DownsampleLevel lvl;
-        lvl.width = w;
-        lvl.height = h;
+        lvl.width = size;
+        lvl.height = size;
 
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = w;
-        desc.Height = h;
+        desc.Width = size;
+        desc.Height = size;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;       // один канал
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
@@ -1099,37 +1090,10 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
         if (FAILED(hr)) return hr;
 
         m_downsampleChain.push_back(std::move(lvl));
-    }
 
-    // Последующие уровни с уменьшением размера вдвое
-    while (w > 1 || h > 1)
-    {
-        w = max(1u, w / 2);
-        h = max(1u, h / 2);
-
-        DownsampleLevel lvl;
-        lvl.width = w;
-        lvl.height = h;
-
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = w;
-        desc.Height = h;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-
-        HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &lvl.texture);
-        if (FAILED(hr)) return hr;
-        hr = m_device->CreateRenderTargetView(lvl.texture.Get(), nullptr, &lvl.rtv);
-        if (FAILED(hr)) return hr;
-        hr = m_device->CreateShaderResourceView(lvl.texture.Get(), nullptr, &lvl.srv);
-        if (FAILED(hr)) return hr;
-
-        m_downsampleChain.push_back(std::move(lvl));
+        if (size == 1) break;
+        size /= 2;
+        if (size < 1) size = 1;
     }
 
     // Staging текстура для чтения последнего уровня (1x1)
@@ -1138,7 +1102,7 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
     stagingDesc.Height = 1;
     stagingDesc.MipLevels = 1;
     stagingDesc.ArraySize = 1;
-    stagingDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    stagingDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     stagingDesc.SampleDesc.Count = 1;
     stagingDesc.SampleDesc.Quality = 0;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
@@ -1179,12 +1143,12 @@ HRESULT Render::CreateQuadResources()
     hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_quadInputLayout);
     if (FAILED(hr)) return hr;
 
-    // Вершинный буфер 
+    // Вершинный буфер (порядок для TRIANGLE_STRIP, как в референсе)
     QuadVertex vertices[4] = {
-        { -1.0f, -1.0f, 1.0f, 0.0f, 1.0f },
-        {  1.0f, -1.0f, 1.0f, 1.0f, 1.0f },
-        { -1.0f,  1.0f, 1.0f, 0.0f, 0.0f },
-        {  1.0f,  1.0f, 1.0f, 1.0f, 0.0f }
+        { -1.0f, -1.0f, 0.0f, 0.0f, 1.0f },
+        { -1.0f,  1.0f, 0.0f, 0.0f, 0.0f },
+        {  1.0f, -1.0f, 0.0f, 1.0f, 1.0f },
+        {  1.0f,  1.0f, 0.0f, 1.0f, 0.0f }
     };
     D3D11_BUFFER_DESC vbDesc = {};
     vbDesc.ByteWidth = sizeof(vertices);
@@ -1192,16 +1156,6 @@ HRESULT Render::CreateQuadResources()
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     D3D11_SUBRESOURCE_DATA vbData = { vertices };
     hr = m_device->CreateBuffer(&vbDesc, &vbData, &m_quadVertexBuffer);
-    if (FAILED(hr)) return hr;
-
-    // Индексный буфер (два треугольника)
-    WORD indices[6] = { 0, 1, 2, 1, 3, 2 };
-    D3D11_BUFFER_DESC ibDesc = {};
-    ibDesc.ByteWidth = sizeof(indices);
-    ibDesc.Usage = D3D11_USAGE_DEFAULT;
-    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA ibData = { indices };
-    hr = m_device->CreateBuffer(&ibDesc, &ibData, &m_quadIndexBuffer);
     if (FAILED(hr)) return hr;
 
     return S_OK;
@@ -1263,10 +1217,38 @@ HRESULT Render::CreatePostprocessShaders()
 
 void Render::ComputeAverageLuminance()
 {
-    // Сохраняем текущие render targets
+    // Сохраняем текущее состояние
     ComPtr<ID3D11RenderTargetView> oldRTV;
     ComPtr<ID3D11DepthStencilView> oldDSV;
     m_context->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    ComPtr<ID3D11VertexShader> oldVS;
+    ComPtr<ID3D11PixelShader> oldPS;
+    ComPtr<ID3D11InputLayout> oldLayout;
+    m_context->VSGetShader(&oldVS, nullptr, nullptr);
+    m_context->PSGetShader(&oldPS, nullptr, nullptr);
+    m_context->IAGetInputLayout(&oldLayout);
+
+    D3D11_VIEWPORT oldVP = {};
+    UINT numVP = 1;
+    m_context->RSGetViewports(&numVP, &oldVP);
+
+    // Явное отключение depth testing (без этого quad может быть отсечён)
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = FALSE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dsDesc.StencilEnable = FALSE;
+    ComPtr<ID3D11DepthStencilState> noDepthState;
+    m_device->CreateDepthStencilState(&dsDesc, &noDepthState);
+    m_context->OMSetDepthStencilState(noDepthState.Get(), 0);
+
+    // Настройка fullscreen quad (TRIANGLE_STRIP, как в референсе)
+    UINT stride = sizeof(QuadVertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetInputLayout(m_quadInputLayout.Get());
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
 
     D3D11_VIEWPORT vp = {};
     vp.MinDepth = 0;
@@ -1278,30 +1260,21 @@ void Render::ComputeAverageLuminance()
         vp.Width = (float)target.width;
         vp.Height = (float)target.height;
         m_context->RSSetViewports(1, &vp);
+
         m_context->OMSetRenderTargets(1, target.rtv.GetAddressOf(), nullptr);
 
-        const float black[4] = { 0,0,0,0 };
-        m_context->ClearRenderTargetView(target.rtv.Get(), black);
-
-        m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
         m_context->PSSetShader(m_brightnessPS.Get(), nullptr, 0);
         m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
         m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-        UINT stride = sizeof(QuadVertex);
-        UINT offset = 0;
-        m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
-        m_context->IASetIndexBuffer(m_quadIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
-        m_context->IASetInputLayout(m_quadInputLayout.Get());
-        m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_context->DrawIndexed(6, 0, 0);
+        m_context->Draw(4, 0);
 
-        // Очистка SRV
         ID3D11ShaderResourceView* nullSRV = nullptr;
         m_context->PSSetShaderResources(0, 1, &nullSRV);
     }
 
-    // Шаг 2: последовательное уменьшение
+    // Шаг 2: последовательное уменьшение (downsample chain)
+    m_context->PSSetShader(m_copyPS.Get(), nullptr, 0);
     for (size_t i = 1; i < m_downsampleChain.size(); ++i)
     {
         auto& src = m_downsampleChain[i - 1];
@@ -1311,14 +1284,9 @@ void Render::ComputeAverageLuminance()
         m_context->RSSetViewports(1, &vp);
         m_context->OMSetRenderTargets(1, dst.rtv.GetAddressOf(), nullptr);
 
-        const float black[4] = { 0,0,0,0 };
-        m_context->ClearRenderTargetView(dst.rtv.Get(), black);
-
-        m_context->PSSetShader(m_copyPS.Get(), nullptr, 0);
         m_context->PSSetShaderResources(0, 1, src.srv.GetAddressOf());
-        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-        m_context->DrawIndexed(6, 0, 0);
+        m_context->Draw(4, 0);
 
         ID3D11ShaderResourceView* nullSRV = nullptr;
         m_context->PSSetShaderResources(0, 1, &nullSRV);
@@ -1332,78 +1300,74 @@ void Render::ComputeAverageLuminance()
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_context->Map(m_luminanceStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
     {
-        float logLum = *(float*)mapped.pData;
+        float logLum = ((float*)mapped.pData)[0];
         m_context->Unmap(m_luminanceStaging.Get(), 0);
 
-        // Вычисляем среднюю яркость L = exp(logLum) - 1
         float avgLum = expf(logLum) - 1.0f;
-
-        // Защита от слишком малых значений
         if (avgLum < 0.001f) avgLum = 0.001f;
 
-        // Вычисление времени с предыдущего кадра
         auto now = std::chrono::steady_clock::now();
         float deltaTime = std::chrono::duration<float>(now - m_lastFrameTime).count();
         m_lastFrameTime = now;
+        if (deltaTime > 0.1f) deltaTime = 0.1f;
 
-        // Обновление адаптированной яркости
         float expGain = 1.0f - expf(-deltaTime / m_eyeAdaptationSpeed);
         m_adaptedLuminance += (avgLum - m_adaptedLuminance) * expGain;
-
-        // Защита адаптированной яркости
         if (m_adaptedLuminance < 0.001f) m_adaptedLuminance = 0.001f;
 
-        // Расчёт экспозиции на основе адаптированной яркости
-        float keyValue = 1.03f - 2.0f / (2.0f + log10f(m_adaptedLuminance + 1.0f));
-        float exposure = keyValue / m_adaptedLuminance;
-        m_currentExposure = exposure;
-
-        // Запись в константный буфер
-        D3D11_MAPPED_SUBRESOURCE cbMap;
-        if (SUCCEEDED(m_context->Map(m_tonemapCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMap)))
-        {
-            TonemapConstants* constants = (TonemapConstants*)cbMap.pData;
-            constants->exposure = exposure;
-            constants->pad[0] = constants->pad[1] = constants->pad[2] = 0.0f;
-            m_context->Unmap(m_tonemapCB.Get(), 0);
-        }
+        // Обновляем debug-значение экспозиции (как в шейдере: exp(adapted) - 1)
+        float shaderLum = expf(m_adaptedLuminance) - 1.0f;
+        if (shaderLum < 0.001f) shaderLum = 0.001f;
+        float keyValue = 1.03f - 2.0f / (2.0f + log10f(shaderLum + 1.0f));
+        m_currentExposure = keyValue / shaderLum;
     }
 
-    // Восстановление старых render targets и viewport
+    // Восстановление старого состояния
     m_context->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
-    RECT rect;
-    GetClientRect(m_hwnd, &rect);
-    vp.Width = (float)(rect.right - rect.left);
-    vp.Height = (float)(rect.bottom - rect.top);
-    vp.TopLeftX = vp.TopLeftY = 0;
-    m_context->RSSetViewports(1, &vp);
+    m_context->OMSetDepthStencilState(nullptr, 0);
+    m_context->VSSetShader(oldVS.Get(), nullptr, 0);
+    m_context->PSSetShader(oldPS.Get(), nullptr, 0);
+    m_context->IASetInputLayout(oldLayout.Get());
+    m_context->RSSetViewports(1, &oldVP);
 }
 
 void Render::ApplyTonemap()
 {
-    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
-    m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
-    m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
-    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
-    m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
+    if (!m_hdrSRV || !m_tonemapPS || !m_tonemapCB) return;
 
-    D3D11_RASTERIZER_DESC rsDesc = {};
-    rsDesc.FillMode = D3D11_FILL_SOLID;
-    rsDesc.CullMode = D3D11_CULL_NONE;
-    rsDesc.FrontCounterClockwise = FALSE;
-    ComPtr<ID3D11RasterizerState> rsState;
-    m_device->CreateRasterizerState(&rsDesc, &rsState);
-    m_context->RSSetState(rsState.Get());
+    m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), nullptr);
+
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = float(rect.right - rect.left);
+    vp.Height = float(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
 
     UINT stride = sizeof(QuadVertex);
     UINT offset = 0;
     m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
-    m_context->IASetIndexBuffer(m_quadIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     m_context->IASetInputLayout(m_quadInputLayout.Get());
-    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_context->DrawIndexed(6, 0, 0);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
+    m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-    // Очистка SRV
+    // Передаём adapted luminance в шейдер (как в референсе)
+    D3D11_MAPPED_SUBRESOURCE cbMap = {};
+    if (SUCCEEDED(m_context->Map(m_tonemapCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMap)))
+    {
+        TonemapConstants* cb = (TonemapConstants*)cbMap.pData;
+        cb->Params = XMFLOAT4(m_adaptedLuminance, 0, 0, 0);
+        m_context->Unmap(m_tonemapCB.Get(), 0);
+    }
+    m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
+
+    m_context->Draw(4, 0);
+
     ID3D11ShaderResourceView* nullSRV = nullptr;
     m_context->PSSetShaderResources(0, 1, &nullSRV);
 }

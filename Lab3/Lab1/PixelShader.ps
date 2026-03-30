@@ -76,6 +76,13 @@ float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
     return clamp(F0 + (maxReflection - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
 }
 
+float ComputePointLightFalloff(float distanceToLight, float range)
+{
+    float invDist2 = 1.0f / max(distanceToLight * distanceToLight, 1e-4f);
+    float rangeFade = saturate(1.0f - pow(distanceToLight / max(range, 1e-4f), 4.0f));
+    return invDist2 * rangeFade * rangeFade;
+}
+
 float4 main(PSIn input) : SV_Target0
 {
     float viewMode = cameraPosAndMode.w;
@@ -108,8 +115,7 @@ float4 main(PSIn input) : SV_Target0
         float dist = length(Lvec);
         float3 L = (dist > 1e-5f) ? (Lvec / dist) : float3(0, 1, 0);
 
-        float attenuation = 1.0f / max(dist * dist, 1e-4f);
-        attenuation = clamp(attenuation, 0.0f, 1.0f);
+        float attenuation = ComputePointLightFalloff(dist, 6.0f);
 
         float3 radiance = lightColor[i].rgb * lightColor[i].a * attenuation;
 

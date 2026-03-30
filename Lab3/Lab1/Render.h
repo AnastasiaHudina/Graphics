@@ -162,10 +162,9 @@ private:
     // Сэмплер с линейной фильтрацией
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_linearSampler;
 
-    // Константный буфер для tone mapping (экспозиция)
+    // Константный буфер для tone mapping
     struct TonemapConstants {
-        float exposure;
-        float pad[3];
+        DirectX::XMFLOAT4 Params; // x = adaptedLuminance
     };
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_tonemapCB;
 
