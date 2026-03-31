@@ -4,6 +4,9 @@
 #include <string>
 #include <cmath>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -145,6 +148,36 @@ HRESULT Render::Initialize(HWND hwnd)
     hr = CreateEnvironmentResources();
     if (FAILED(hr)) return hr;
 
+    // Загрузка и обработка HDRI для IBL
+    hr = LoadHDRI(L"pathway_morning_4k.hdr");
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка загрузки HDRI, IBL будет отключен\n");
+    }
+    else
+    {
+        hr = ConvertEquirectToCubemap();
+        if (FAILED(hr))
+        {
+            OutputDebugString(L"Ошибка конвертации HDRI в cubemap\n");
+        }
+        else
+        {
+            hr = ComputeIrradianceMap();
+            if (FAILED(hr))
+            {
+                OutputDebugString(L"Ошибка вычисления irradiance map\n");
+            }
+        }
+    }
+
+    // Создание skybox
+    hr = CreateSkyboxResources();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания skybox, будет использован fallback\n");
+    }
+
     return S_OK;
 }
 
@@ -164,7 +197,7 @@ void Render::Shutdown()
     m_hdrSRV.Reset();
 
     // Очистка цепочки downsampling
-    m_downsampleChain.clear(); // автоматически вызовет Reset() для всех ComPtr внутри
+    m_downsampleChain.clear(); 
 
     // Освобождение staging-текстуры
     m_luminanceStaging.Reset();
@@ -186,6 +219,23 @@ void Render::Shutdown()
     m_envSRV.Reset();
     m_envCubemap.Reset();
     m_environmentPS.Reset();
+
+    // IBL ресурсы
+    m_hdriTexture.Reset();
+    m_hdriSRV.Reset();
+    m_hdriCubemap.Reset();
+    m_hdriCubemapSRV.Reset();
+    m_irradianceMap.Reset();
+    m_irradianceSRV.Reset();
+    m_equirectToCubemapPS.Reset();
+    m_irradiancePS.Reset();
+
+    // Skybox
+    m_skyboxVertexBuffer.Reset();
+    m_skyboxIndexBuffer.Reset();
+    m_skyboxVS.Reset();
+    m_skyboxPS.Reset();
+    m_skyboxInputLayout.Reset();
 
     if (m_context)
     {
@@ -649,8 +699,7 @@ void Render::DrawScene()
     m_context->PSSetConstantBuffers(2, 1, m_lightBuffer.GetAddressOf());
     m_context->PSSetConstantBuffers(3, 1, m_materialBuffer.GetAddressOf());
 
-    // Environment background
-    DrawEnvironmentToCurrentTarget();
+    DrawSkybox();
 
     // Настройка pipeline для куба
     UINT stride = sizeof(Vertex);
@@ -661,6 +710,13 @@ void Render::DrawScene()
     m_context->IASetInputLayout(m_inputLayout.Get());
     m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
     m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
+
+    // Установка IBL ресурсов (irradiance map)
+    if (m_irradianceSRV)
+    {
+        m_context->PSSetShaderResources(1, 1, m_irradianceSRV.GetAddressOf());
+        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+    }
 
     if (m_annotation) m_annotation->BeginEvent(L"DrawCube");
     // Sphere indices count = buffer size / sizeof(WORD) computed from CreateGeometry
@@ -674,10 +730,6 @@ void Render::DrawScene()
     {
         // Пост-обработка: вычисление яркости и tone mapping
         ComputeAverageLuminance();
-
-        // Переключение на back buffer
-        m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), nullptr);
-        m_context->ClearRenderTargetView(m_renderTarget.Get(), clearColor);
 
         ApplyTonemap();
     }
@@ -721,20 +773,6 @@ void Render::DrawScene()
         ImGui::Text("Adapted Luminance: %.3f", m_adaptedLuminance);
         ImGui::Text("Exposure: %.3f", m_currentExposure);
         ImGui::End();
-
-        //== ПОЯСНЕНИЕ ==
-        // 
-        //Adapted Luminance – сглаженное во времени значение средней яркости сцены, к которому адаптируется «виртуальный глаз».
-        //При резком изменении освещения (например, переключении интенсивности источника с 1 на 100) это число должно плавно 
-        //расти/падать в течение нескольких секунд, а при статичной сцене оставаться примерно постоянным.
-        //
-        //Exposure – экспозиция, обратно пропорциональная адаптированной яркости. 
-        //Она определяет, насколько усиливается изображение перед тональным отображением: в тёмных сценах экспозиция большая (>1), в ярких – маленькая (<1). 
-        //При изменении яркости экспозиция должна плавно следовать за адаптированной яркостью (увеличиваться при потемнении и уменьшаться при осветлении).
-        //
-        //Тестирование: 
-        //если при тестировании оба параметра изменяются плавно и предсказуемо, а визуально картинка адаптируется без резких скачков, 
-        //значит реализация eye adaptation и тонального отображения выполнена корректно.
 
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -1024,20 +1062,21 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
 {
     m_downsampleChain.clear();
 
-    UINT w = width, h = height;
+    UINT size = min(width, height);
 
-    // Уровень 0 – того же размера, для хранения яркости
+    // Квадратные текстуры от min(w,h) до 1x1, формат RGBA32F (как в референсе)
+    while (size >= 1)
     {
         DownsampleLevel lvl;
-        lvl.width = w;
-        lvl.height = h;
+        lvl.width = size;
+        lvl.height = size;
 
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = w;
-        desc.Height = h;
+        desc.Width = size;
+        desc.Height = size;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;       // один канал
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
@@ -1051,37 +1090,10 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
         if (FAILED(hr)) return hr;
 
         m_downsampleChain.push_back(std::move(lvl));
-    }
 
-    // Последующие уровни с уменьшением размера вдвое
-    while (w > 1 || h > 1)
-    {
-        w = max(1u, w / 2);
-        h = max(1u, h / 2);
-
-        DownsampleLevel lvl;
-        lvl.width = w;
-        lvl.height = h;
-
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = w;
-        desc.Height = h;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-
-        HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &lvl.texture);
-        if (FAILED(hr)) return hr;
-        hr = m_device->CreateRenderTargetView(lvl.texture.Get(), nullptr, &lvl.rtv);
-        if (FAILED(hr)) return hr;
-        hr = m_device->CreateShaderResourceView(lvl.texture.Get(), nullptr, &lvl.srv);
-        if (FAILED(hr)) return hr;
-
-        m_downsampleChain.push_back(std::move(lvl));
+        if (size == 1) break;
+        size /= 2;
+        if (size < 1) size = 1;
     }
 
     // Staging текстура для чтения последнего уровня (1x1)
@@ -1090,7 +1102,7 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
     stagingDesc.Height = 1;
     stagingDesc.MipLevels = 1;
     stagingDesc.ArraySize = 1;
-    stagingDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    stagingDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     stagingDesc.SampleDesc.Count = 1;
     stagingDesc.SampleDesc.Quality = 0;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
@@ -1131,13 +1143,12 @@ HRESULT Render::CreateQuadResources()
     hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_quadInputLayout);
     if (FAILED(hr)) return hr;
 
-    // Вершинный буфер (четыре вершины). z=1 для environment pass — дальняя плоскость,
-    // чтобы фон не перекрывал геометрию. Для постпроцесса depth не используется.
+    // Вершинный буфер (порядок для TRIANGLE_STRIP, как в референсе)
     QuadVertex vertices[4] = {
-        { -1.0f, -1.0f, 1.0f, 0.0f, 1.0f },
-        {  1.0f, -1.0f, 1.0f, 1.0f, 1.0f },
-        { -1.0f,  1.0f, 1.0f, 0.0f, 0.0f },
-        {  1.0f,  1.0f, 1.0f, 1.0f, 0.0f }
+        { -1.0f, -1.0f, 0.0f, 0.0f, 1.0f },
+        { -1.0f,  1.0f, 0.0f, 0.0f, 0.0f },
+        {  1.0f, -1.0f, 0.0f, 1.0f, 1.0f },
+        {  1.0f,  1.0f, 0.0f, 1.0f, 0.0f }
     };
     D3D11_BUFFER_DESC vbDesc = {};
     vbDesc.ByteWidth = sizeof(vertices);
@@ -1145,16 +1156,6 @@ HRESULT Render::CreateQuadResources()
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     D3D11_SUBRESOURCE_DATA vbData = { vertices };
     hr = m_device->CreateBuffer(&vbDesc, &vbData, &m_quadVertexBuffer);
-    if (FAILED(hr)) return hr;
-
-    // Индексный буфер (два треугольника)
-    WORD indices[6] = { 0, 1, 2, 1, 3, 2 };
-    D3D11_BUFFER_DESC ibDesc = {};
-    ibDesc.ByteWidth = sizeof(indices);
-    ibDesc.Usage = D3D11_USAGE_DEFAULT;
-    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA ibData = { indices };
-    hr = m_device->CreateBuffer(&ibDesc, &ibData, &m_quadIndexBuffer);
     if (FAILED(hr)) return hr;
 
     return S_OK;
@@ -1193,9 +1194,9 @@ HRESULT Render::CreatePostprocessShaders()
     // Линейный сэмплер
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -1216,10 +1217,38 @@ HRESULT Render::CreatePostprocessShaders()
 
 void Render::ComputeAverageLuminance()
 {
-    // Сохраняем текущие render targets
+    // Сохраняем текущее состояние
     ComPtr<ID3D11RenderTargetView> oldRTV;
     ComPtr<ID3D11DepthStencilView> oldDSV;
     m_context->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    ComPtr<ID3D11VertexShader> oldVS;
+    ComPtr<ID3D11PixelShader> oldPS;
+    ComPtr<ID3D11InputLayout> oldLayout;
+    m_context->VSGetShader(&oldVS, nullptr, nullptr);
+    m_context->PSGetShader(&oldPS, nullptr, nullptr);
+    m_context->IAGetInputLayout(&oldLayout);
+
+    D3D11_VIEWPORT oldVP = {};
+    UINT numVP = 1;
+    m_context->RSGetViewports(&numVP, &oldVP);
+
+    // Явное отключение depth testing (без этого quad может быть отсечён)
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = FALSE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dsDesc.StencilEnable = FALSE;
+    ComPtr<ID3D11DepthStencilState> noDepthState;
+    m_device->CreateDepthStencilState(&dsDesc, &noDepthState);
+    m_context->OMSetDepthStencilState(noDepthState.Get(), 0);
+
+    // Настройка fullscreen quad (TRIANGLE_STRIP, как в референсе)
+    UINT stride = sizeof(QuadVertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetInputLayout(m_quadInputLayout.Get());
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
 
     D3D11_VIEWPORT vp = {};
     vp.MinDepth = 0;
@@ -1231,30 +1260,21 @@ void Render::ComputeAverageLuminance()
         vp.Width = (float)target.width;
         vp.Height = (float)target.height;
         m_context->RSSetViewports(1, &vp);
+
         m_context->OMSetRenderTargets(1, target.rtv.GetAddressOf(), nullptr);
 
-        const float black[4] = { 0,0,0,0 };
-        m_context->ClearRenderTargetView(target.rtv.Get(), black);
-
-        m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
         m_context->PSSetShader(m_brightnessPS.Get(), nullptr, 0);
         m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
         m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-        UINT stride = sizeof(QuadVertex);
-        UINT offset = 0;
-        m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
-        m_context->IASetIndexBuffer(m_quadIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
-        m_context->IASetInputLayout(m_quadInputLayout.Get());
-        m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_context->DrawIndexed(6, 0, 0);
+        m_context->Draw(4, 0);
 
-        // Очистка SRV
         ID3D11ShaderResourceView* nullSRV = nullptr;
         m_context->PSSetShaderResources(0, 1, &nullSRV);
     }
 
-    // Шаг 2: последовательное уменьшение (копирование с линейной фильтрацией)
+    // Шаг 2: последовательное уменьшение (downsample chain)
+    m_context->PSSetShader(m_copyPS.Get(), nullptr, 0);
     for (size_t i = 1; i < m_downsampleChain.size(); ++i)
     {
         auto& src = m_downsampleChain[i - 1];
@@ -1264,14 +1284,9 @@ void Render::ComputeAverageLuminance()
         m_context->RSSetViewports(1, &vp);
         m_context->OMSetRenderTargets(1, dst.rtv.GetAddressOf(), nullptr);
 
-        const float black[4] = { 0,0,0,0 };
-        m_context->ClearRenderTargetView(dst.rtv.Get(), black);
-
-        m_context->PSSetShader(m_copyPS.Get(), nullptr, 0);
         m_context->PSSetShaderResources(0, 1, src.srv.GetAddressOf());
-        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-        m_context->DrawIndexed(6, 0, 0);
+        m_context->Draw(4, 0);
 
         ID3D11ShaderResourceView* nullSRV = nullptr;
         m_context->PSSetShaderResources(0, 1, &nullSRV);
@@ -1285,87 +1300,80 @@ void Render::ComputeAverageLuminance()
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_context->Map(m_luminanceStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
     {
-        float logLum = *(float*)mapped.pData;
+        float logLum = ((float*)mapped.pData)[0];
         m_context->Unmap(m_luminanceStaging.Get(), 0);
 
-        // Вычисляем среднюю яркость L = exp(logLum) - 1
         float avgLum = expf(logLum) - 1.0f;
-
-        // Защита от слишком малых значений
         if (avgLum < 0.001f) avgLum = 0.001f;
 
-        // Вычисление времени с предыдущего кадра
         auto now = std::chrono::steady_clock::now();
         float deltaTime = std::chrono::duration<float>(now - m_lastFrameTime).count();
         m_lastFrameTime = now;
+        if (deltaTime > 0.1f) deltaTime = 0.1f;
 
-        // Обновление адаптированной яркости
         float expGain = 1.0f - expf(-deltaTime / m_eyeAdaptationSpeed);
         m_adaptedLuminance += (avgLum - m_adaptedLuminance) * expGain;
-
-        // Защита адаптированной яркости
         if (m_adaptedLuminance < 0.001f) m_adaptedLuminance = 0.001f;
 
-        // Расчёт экспозиции на основе адаптированной яркости
-        float keyValue = 1.03f - 2.0f / (2.0f + log10f(m_adaptedLuminance + 1.0f));
-        float exposure = keyValue / m_adaptedLuminance;
-        m_currentExposure = exposure;
-
-        // Запись в константный буфер
-        D3D11_MAPPED_SUBRESOURCE cbMap;
-        if (SUCCEEDED(m_context->Map(m_tonemapCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMap)))
-        {
-            TonemapConstants* constants = (TonemapConstants*)cbMap.pData;
-            constants->exposure = exposure;
-            constants->pad[0] = constants->pad[1] = constants->pad[2] = 0.0f;
-            m_context->Unmap(m_tonemapCB.Get(), 0);
-        }
+        // Обновляем debug-значение экспозиции (как в шейдере: exp(adapted) - 1)
+        float shaderLum = expf(m_adaptedLuminance) - 1.0f;
+        if (shaderLum < 0.001f) shaderLum = 0.001f;
+        float keyValue = 1.03f - 2.0f / (2.0f + log10f(shaderLum + 1.0f));
+        m_currentExposure = keyValue / shaderLum;
     }
 
-    // Восстановление старых render targets и viewport
+    // Восстановление старого состояния
     m_context->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
-    RECT rect;
-    GetClientRect(m_hwnd, &rect);
-    vp.Width = (float)(rect.right - rect.left);
-    vp.Height = (float)(rect.bottom - rect.top);
-    vp.TopLeftX = vp.TopLeftY = 0;
-    m_context->RSSetViewports(1, &vp);
+    m_context->OMSetDepthStencilState(nullptr, 0);
+    m_context->VSSetShader(oldVS.Get(), nullptr, 0);
+    m_context->PSSetShader(oldPS.Get(), nullptr, 0);
+    m_context->IASetInputLayout(oldLayout.Get());
+    m_context->RSSetViewports(1, &oldVP);
 }
 
 void Render::ApplyTonemap()
 {
-    // Предполагается, что back buffer уже установлен как render target
-    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
-    m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
-    m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
-    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
-    m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
+    if (!m_hdrSRV || !m_tonemapPS || !m_tonemapCB) return;
 
-    // Создаём состояние растеризатора без отсечения граней
-    D3D11_RASTERIZER_DESC rsDesc = {};
-    rsDesc.FillMode = D3D11_FILL_SOLID;
-    rsDesc.CullMode = D3D11_CULL_NONE;
-    rsDesc.FrontCounterClockwise = FALSE;
-    ComPtr<ID3D11RasterizerState> rsState;
-    m_device->CreateRasterizerState(&rsDesc, &rsState);
-    m_context->RSSetState(rsState.Get());
+    m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), nullptr);
+
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = float(rect.right - rect.left);
+    vp.Height = float(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
 
     UINT stride = sizeof(QuadVertex);
     UINT offset = 0;
     m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
-    m_context->IASetIndexBuffer(m_quadIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     m_context->IASetInputLayout(m_quadInputLayout.Get());
-    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_context->DrawIndexed(6, 0, 0);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
+    m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-    // Очистка SRV
+    // Передаём adapted luminance в шейдер (как в референсе)
+    D3D11_MAPPED_SUBRESOURCE cbMap = {};
+    if (SUCCEEDED(m_context->Map(m_tonemapCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMap)))
+    {
+        TonemapConstants* cb = (TonemapConstants*)cbMap.pData;
+        cb->Params = XMFLOAT4(m_adaptedLuminance, 0, 0, 0);
+        m_context->Unmap(m_tonemapCB.Get(), 0);
+    }
+    m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
+
+    m_context->Draw(4, 0);
+
     ID3D11ShaderResourceView* nullSRV = nullptr;
     m_context->PSSetShaderResources(0, 1, &nullSRV);
 }
 
 HRESULT Render::CreateEnvironmentResources()
 {
-    // Create a tiny procedural cubemap (6 faces) to demonstrate cubemap usage without external assets.
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = 16;
     desc.Height = 16;
@@ -1384,7 +1392,6 @@ HRESULT Render::CreateEnvironmentResources()
         return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
     };
 
-    // Simple gradient per face
     const uint32_t faceColors[6] = {
         pack(255, 120, 120, 255), // +X
         pack(120, 255, 120, 255), // -X
@@ -1454,14 +1461,820 @@ HRESULT Render::CreateEnvironmentResources()
     return hr;
 }
 
+HRESULT Render::LoadHDRI(const wchar_t* filename)
+{
+    // Конвертируем wchar_t* в char*
+    char filenameA[MAX_PATH];
+    WideCharToMultiByte(CP_ACP, 0, filename, -1, filenameA, MAX_PATH, nullptr, nullptr);
+
+    int width, height, channels;
+    float* data = stbi_loadf(filenameA, &width, &height, &channels, 4); // принудительно 4 канала
+
+    if (!data)
+    {
+        OutputDebugString(L"Ошибка загрузки HDRI файла\n");
+        return E_FAIL;
+    }
+
+    // Создание 2D текстуры формата R32G32B32A32_FLOAT
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA initData{};
+    initData.pSysMem = data;
+    initData.SysMemPitch = width * 4 * sizeof(float);
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, &initData, &m_hdriTexture);
+    stbi_image_free(data);
+
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания HDRI текстуры\n");
+        return hr;
+    }
+
+    // Создание SRV
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+
+    hr = m_device->CreateShaderResourceView(m_hdriTexture.Get(), &srvDesc, &m_hdriSRV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания HDRI SRV\n");
+        return hr;
+    }
+
+    return S_OK;
+}
+
+HRESULT Render::ConvertEquirectToCubemap()
+{
+    const UINT cubemapSize = 512;
+
+    // Создание cubemap текстуры
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = cubemapSize;
+    desc.Height = cubemapSize;
+    desc.MipLevels = 1;
+    desc.ArraySize = 6;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &m_hdriCubemap);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания cubemap текстуры\n");
+        return hr;
+    }
+
+    // Создание SRV для cubemap
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+    srvDesc.TextureCube.MipLevels = 1;
+    srvDesc.TextureCube.MostDetailedMip = 0;
+
+    hr = m_device->CreateShaderResourceView(m_hdriCubemap.Get(), &srvDesc, &m_hdriCubemapSRV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания cubemap SRV\n");
+        return hr;
+    }
+
+    // Компиляция шейдеров для конвертации
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+    #ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+    #endif
+
+    // Вершинный шейдер
+    ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
+    hr = D3DCompileFromFile(L"CubemapFace.vs", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "vs_5_0", flags, 0, &vsBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции CubemapFace.vs\n");
+        return hr;
+    }
+
+    ComPtr<ID3D11VertexShader> cubemapVS;
+    hr = m_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &cubemapVS);
+    if (FAILED(hr)) return hr;
+
+    // Пиксельный шейдер
+    hr = D3DCompileFromFile(L"EquirectToCubemap.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции EquirectToCubemap.ps\n");
+        return hr;
+    }
+
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_equirectToCubemapPS);
+    if (FAILED(hr)) return hr;
+
+    // Создание input layout для cubemap vertex shader
+    D3D11_INPUT_ELEMENT_DESC layout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+
+    ComPtr<ID3D11InputLayout> cubemapInputLayout;
+    hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &cubemapInputLayout);
+    if (FAILED(hr)) return hr;
+
+    // Создание константного буфера для ViewProj матрицы каждой грани
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth = sizeof(XMMATRIX);
+    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    ComPtr<ID3D11Buffer> viewProjCB;
+    hr = m_device->CreateBuffer(&cbDesc, nullptr, &viewProjCB);
+    if (FAILED(hr)) return hr;
+
+    // Камеры для каждой грани cubemap 
+    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
+
+    XMVECTOR directions[6] = {
+        XMVectorSet(1, 0, 0, 0),    // +X
+        XMVectorSet(-1, 0, 0, 0),   // -X
+        XMVectorSet(0, 1, 0, 0),    // +Y
+        XMVectorSet(0, -1, 0, 0),   // -Y
+        XMVectorSet(0, 0, 1, 0),    // +Z
+        XMVectorSet(0, 0, -1, 0)    // -Z
+    };
+
+    XMVECTOR ups[6] = {
+        XMVectorSet(0, 1, 0, 0),    // +X
+        XMVectorSet(0, 1, 0, 0),    // -X
+        XMVectorSet(0, 0, -1, 0),   // +Y
+        XMVectorSet(0, 0, 1, 0),    // -Y
+        XMVectorSet(0, 1, 0, 0),    // +Z
+        XMVectorSet(0, 1, 0, 0)     // -Z
+    };
+
+    // Создание проекционной матрицы (90 градусов FOV)
+    const float nearp = 0.1f;
+    const float farp = 10.0f;
+    const float fov = XM_PIDIV2;
+    const float width = nearp / tanf(fov / 2.0f);
+    const float height = width;
+    XMMATRIX proj = XMMatrixPerspectiveLH(2.0f * width, 2.0f * height, nearp, farp);
+
+    // Создание quad геометрии 
+    struct CubemapVertex {
+        float pos[3];
+        float uv[2];
+    };
+
+    // Quad перед камерой на расстоянии 0.5 
+    CubemapVertex quadVerts[4] = {
+        { {-0.5f, -0.5f, 0.5f}, {0, 1} },
+        { {-0.5f,  0.5f, 0.5f}, {0, 0} },
+        { { 0.5f,  0.5f, 0.5f}, {1, 0} },
+        { { 0.5f, -0.5f, 0.5f}, {1, 1} }
+    };
+
+    WORD quadIndices[6] = { 0, 1, 2, 0, 2, 3 };
+
+    D3D11_BUFFER_DESC vbDesc{};
+    vbDesc.ByteWidth = sizeof(quadVerts);
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
+    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA vbData{};
+    vbData.pSysMem = quadVerts;
+
+    ComPtr<ID3D11Buffer> quadVB;
+    hr = m_device->CreateBuffer(&vbDesc, &vbData, &quadVB);
+    if (FAILED(hr)) return hr;
+
+    D3D11_BUFFER_DESC ibDesc{};
+    ibDesc.ByteWidth = sizeof(quadIndices);
+    ibDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA ibData{};
+    ibData.pSysMem = quadIndices;
+
+    ComPtr<ID3D11Buffer> quadIB;
+    hr = m_device->CreateBuffer(&ibDesc, &ibData, &quadIB);
+    if (FAILED(hr)) return hr;
+
+    // Рендеринг каждой грани
+    for (UINT face = 0; face < 6; ++face)
+    {
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(ups[face], directions[face]));
+        XMVECTOR up = XMVector3Normalize(XMVector3Cross(directions[face], right));
+
+        XMVECTOR faceCorners[4] = {
+            XMVector3Normalize(directions[face] - right - up),
+            XMVector3Normalize(directions[face] - right + up),
+            XMVector3Normalize(directions[face] + right + up),
+            XMVector3Normalize(directions[face] + right - up)
+        };
+
+        CubemapVertex faceVerts[4] = {
+            { { 0.0f, 0.0f, 0.0f }, {0, 1} },
+            { { 0.0f, 0.0f, 0.0f }, {0, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 1} }
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            XMFLOAT3 pos;
+            XMStoreFloat3(&pos, faceCorners[i]);
+            faceVerts[i].pos[0] = pos.x;
+            faceVerts[i].pos[1] = pos.y;
+            faceVerts[i].pos[2] = pos.z;
+        }
+
+        m_context->UpdateSubresource(quadVB.Get(), 0, nullptr, faceVerts, 0, 0);
+
+        // Создание RTV для текущей грани
+        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = desc.Format;
+        rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtvDesc.Texture2DArray.ArraySize = 1;
+        rtvDesc.Texture2DArray.FirstArraySlice = face;
+        rtvDesc.Texture2DArray.MipSlice = 0;
+
+        ComPtr<ID3D11RenderTargetView> rtv;
+        hr = m_device->CreateRenderTargetView(m_hdriCubemap.Get(), &rtvDesc, &rtv);
+        if (FAILED(hr)) return hr;
+
+        // Настройка view матрицы для грани (используем LookToLH)
+        XMMATRIX view = XMMatrixLookToLH(eye, directions[face], ups[face]);
+        XMMATRIX viewProj = XMMatrixTranspose(view * proj);
+
+        // Обновление константного буфера
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = m_context->Map(viewProjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (SUCCEEDED(hr))
+        {
+            memcpy(mapped.pData, &viewProj, sizeof(XMMATRIX));
+            m_context->Unmap(viewProjCB.Get(), 0);
+        }
+
+        // Установка render target
+        m_context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+
+        // Viewport
+        D3D11_VIEWPORT viewport{};
+        viewport.Width = (float)cubemapSize;
+        viewport.Height = (float)cubemapSize;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        m_context->RSSetViewports(1, &viewport);
+
+        // Clear
+        float clearColor[4] = { 0, 0, 0, 1 };
+        m_context->ClearRenderTargetView(rtv.Get(), clearColor);
+
+        // Настройка rasterizer state
+        D3D11_RASTERIZER_DESC rsDesc = {};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = FALSE;
+        rsDesc.DepthClipEnable = TRUE;
+        ComPtr<ID3D11RasterizerState> rsState;
+        m_device->CreateRasterizerState(&rsDesc, &rsState);
+        m_context->RSSetState(rsState.Get());
+
+        // Рендеринг quad
+        m_context->IASetInputLayout(cubemapInputLayout.Get());
+        UINT stride = sizeof(CubemapVertex);
+        UINT offset = 0;
+        m_context->IASetVertexBuffers(0, 1, quadVB.GetAddressOf(), &stride, &offset);
+        m_context->IASetIndexBuffer(quadIB.Get(), DXGI_FORMAT_R16_UINT, 0);
+        m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        m_context->VSSetShader(cubemapVS.Get(), nullptr, 0);
+        m_context->VSSetConstantBuffers(0, 1, viewProjCB.GetAddressOf());
+
+        m_context->PSSetShader(m_equirectToCubemapPS.Get(), nullptr, 0);
+        m_context->PSSetShaderResources(0, 1, m_hdriSRV.GetAddressOf());
+        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+
+        m_context->DrawIndexed(6, 0, 0);
+
+        // Очистка
+        ID3D11ShaderResourceView* nullSRV = nullptr;
+        m_context->PSSetShaderResources(0, 1, &nullSRV);
+    }
+
+    // Восстановление rasterizer state
+    m_context->RSSetState(nullptr);
+
+    // Восстановление render targets
+    m_context->OMSetRenderTargets(1, m_hdrRTV.GetAddressOf(), m_depthStencil.Get());
+
+    // Восстановление viewport к размерам экрана
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)(rect.right - rect.left);
+    vp.Height = (float)(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
+
+    return S_OK;
+}
+
+HRESULT Render::ComputeIrradianceMap()
+{
+    const UINT irradianceSize = 32;
+
+    // Создание irradiance cubemap
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = irradianceSize;
+    desc.Height = irradianceSize;
+    desc.MipLevels = 1;
+    desc.ArraySize = 6;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &m_irradianceMap);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания irradiance текстуры\n");
+        return hr;
+    }
+
+    // Создание SRV
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+    srvDesc.TextureCube.MipLevels = 1;
+    srvDesc.TextureCube.MostDetailedMip = 0;
+
+    hr = m_device->CreateShaderResourceView(m_irradianceMap.Get(), &srvDesc, &m_irradianceSRV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка создания irradiance SRV\n");
+        return hr;
+    }
+
+    // Компиляция irradiance shader
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+    #ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+    #endif
+
+    ComPtr<ID3DBlob> psBlob, errBlob;
+    hr = D3DCompileFromFile(L"Irradiance.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции Irradiance.ps\n");
+        return hr;
+    }
+
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_irradiancePS);
+    if (FAILED(hr)) return hr;
+
+    // Используем уже существующие ресурсы для рендеринга (cubemap VS, quad geometry)
+    // Компилируем вершинный шейдер снова для input layout
+    ComPtr<ID3DBlob> vsBlob;
+    hr = D3DCompileFromFile(L"CubemapFace.vs", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "vs_5_0", flags, 0, &vsBlob, &errBlob);
+    if (FAILED(hr)) return hr;
+
+    ComPtr<ID3D11VertexShader> cubemapVS;
+    hr = m_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &cubemapVS);
+    if (FAILED(hr)) return hr;
+
+    D3D11_INPUT_ELEMENT_DESC layout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+
+    ComPtr<ID3D11InputLayout> cubemapInputLayout;
+    hr = m_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &cubemapInputLayout);
+    if (FAILED(hr)) return hr;
+
+    // Константный буфер
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth = sizeof(XMMATRIX);
+    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    ComPtr<ID3D11Buffer> viewProjCB;
+    hr = m_device->CreateBuffer(&cbDesc, nullptr, &viewProjCB);
+    if (FAILED(hr)) return hr;
+
+    // Quad geometry
+    struct CubemapVertex {
+        float pos[3];
+        float uv[2];
+    };
+
+    CubemapVertex quadVerts[4] = {
+        { {-0.5f, -0.5f, 0.5f}, {0, 1} },
+        { {-0.5f,  0.5f, 0.5f}, {0, 0} },
+        { { 0.5f,  0.5f, 0.5f}, {1, 0} },
+        { { 0.5f, -0.5f, 0.5f}, {1, 1} }
+    };
+
+    WORD quadIndices[6] = { 0, 1, 2, 0, 2, 3 };
+
+    D3D11_BUFFER_DESC vbDesc{};
+    vbDesc.ByteWidth = sizeof(quadVerts);
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
+    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA vbData{};
+    vbData.pSysMem = quadVerts;
+
+    ComPtr<ID3D11Buffer> quadVB;
+    hr = m_device->CreateBuffer(&vbDesc, &vbData, &quadVB);
+    if (FAILED(hr)) return hr;
+
+    D3D11_BUFFER_DESC ibDesc{};
+    ibDesc.ByteWidth = sizeof(quadIndices);
+    ibDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA ibData{};
+    ibData.pSysMem = quadIndices;
+
+    ComPtr<ID3D11Buffer> quadIB;
+    hr = m_device->CreateBuffer(&ibDesc, &ibData, &quadIB);
+    if (FAILED(hr)) return hr;
+
+    // Camera setup для каждой грани
+    XMVECTOR eye = XMVectorSet(0, 0, 0, 1);
+
+    XMVECTOR directions[6] = {
+        XMVectorSet(1, 0, 0, 0),
+        XMVectorSet(-1, 0, 0, 0),
+        XMVectorSet(0, 1, 0, 0),
+        XMVectorSet(0, -1, 0, 0),
+        XMVectorSet(0, 0, 1, 0),
+        XMVectorSet(0, 0, -1, 0)
+    };
+
+    XMVECTOR ups[6] = {
+        XMVectorSet(0, 1, 0, 0),
+        XMVectorSet(0, 1, 0, 0),
+        XMVectorSet(0, 0, -1, 0),
+        XMVectorSet(0, 0, 1, 0),
+        XMVectorSet(0, 1, 0, 0),
+        XMVectorSet(0, 1, 0, 0)
+    };
+
+    const float nearp = 0.1f;
+    const float farp = 10.0f;
+    const float fov = XM_PIDIV2;
+    const float width = nearp / tanf(fov / 2.0f);
+    const float height = width;
+    XMMATRIX proj = XMMatrixPerspectiveLH(2.0f * width, 2.0f * height, nearp, farp);
+
+    // Рендеринг каждой грани
+    for (UINT face = 0; face < 6; ++face)
+    {
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(ups[face], directions[face]));
+        XMVECTOR up = XMVector3Normalize(XMVector3Cross(directions[face], right));
+
+        XMVECTOR faceCorners[4] = {
+            XMVector3Normalize(directions[face] - right - up),
+            XMVector3Normalize(directions[face] - right + up),
+            XMVector3Normalize(directions[face] + right + up),
+            XMVector3Normalize(directions[face] + right - up)
+        };
+
+        CubemapVertex faceVerts[4] = {
+            { { 0.0f, 0.0f, 0.0f }, {0, 1} },
+            { { 0.0f, 0.0f, 0.0f }, {0, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 0} },
+            { { 0.0f, 0.0f, 0.0f }, {1, 1} }
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            XMFLOAT3 pos;
+            XMStoreFloat3(&pos, faceCorners[i]);
+            faceVerts[i].pos[0] = pos.x;
+            faceVerts[i].pos[1] = pos.y;
+            faceVerts[i].pos[2] = pos.z;
+        }
+
+        m_context->UpdateSubresource(quadVB.Get(), 0, nullptr, faceVerts, 0, 0);
+
+        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = desc.Format;
+        rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtvDesc.Texture2DArray.ArraySize = 1;
+        rtvDesc.Texture2DArray.FirstArraySlice = face;
+        rtvDesc.Texture2DArray.MipSlice = 0;
+
+        ComPtr<ID3D11RenderTargetView> rtv;
+        hr = m_device->CreateRenderTargetView(m_irradianceMap.Get(), &rtvDesc, &rtv);
+        if (FAILED(hr)) return hr;
+
+        XMMATRIX view = XMMatrixLookToLH(eye, directions[face], ups[face]);
+        XMMATRIX viewProj = XMMatrixTranspose(view * proj);
+
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = m_context->Map(viewProjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (SUCCEEDED(hr))
+        {
+            memcpy(mapped.pData, &viewProj, sizeof(XMMATRIX));
+            m_context->Unmap(viewProjCB.Get(), 0);
+        }
+
+        m_context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+
+        D3D11_VIEWPORT viewport{};
+        viewport.Width = (float)irradianceSize;
+        viewport.Height = (float)irradianceSize;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        m_context->RSSetViewports(1, &viewport);
+
+        float clearColor[4] = { 0, 0, 0, 1 };
+        m_context->ClearRenderTargetView(rtv.Get(), clearColor);
+
+        // Настройка rasterizer state
+        D3D11_RASTERIZER_DESC rsDesc = {};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = FALSE;
+        rsDesc.DepthClipEnable = TRUE;
+        ComPtr<ID3D11RasterizerState> rsState;
+        m_device->CreateRasterizerState(&rsDesc, &rsState);
+        m_context->RSSetState(rsState.Get());
+
+        m_context->IASetInputLayout(cubemapInputLayout.Get());
+        UINT stride = sizeof(CubemapVertex);
+        UINT offset = 0;
+        m_context->IASetVertexBuffers(0, 1, quadVB.GetAddressOf(), &stride, &offset);
+        m_context->IASetIndexBuffer(quadIB.Get(), DXGI_FORMAT_R16_UINT, 0);
+        m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        m_context->VSSetShader(cubemapVS.Get(), nullptr, 0);
+        m_context->VSSetConstantBuffers(0, 1, viewProjCB.GetAddressOf());
+
+        m_context->PSSetShader(m_irradiancePS.Get(), nullptr, 0);
+        m_context->PSSetShaderResources(0, 1, m_hdriCubemapSRV.GetAddressOf());
+        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+
+        m_context->DrawIndexed(6, 0, 0);
+
+        ID3D11ShaderResourceView* nullSRV = nullptr;
+        m_context->PSSetShaderResources(0, 1, &nullSRV);
+    }
+
+    // Восстановление rasterizer state
+    m_context->RSSetState(nullptr);
+
+    // Восстановление render targets
+    m_context->OMSetRenderTargets(1, m_hdrRTV.GetAddressOf(), m_depthStencil.Get());
+
+    // Восстановление viewport к размерам экрана
+    RECT rect;
+    GetClientRect(m_hwnd, &rect);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)(rect.right - rect.left);
+    vp.Height = (float)(rect.bottom - rect.top);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
+
+    return S_OK;
+}
+
+HRESULT Render::CreateSkyboxResources()
+{
+    // Создание геометрии сферы для skybox (используем ту же геометрию что и для PBR объекта)
+    const int slices = 64;
+    const int stacks = 32;
+    const float radius = 1.0f;
+
+    std::vector<Vertex> vertices;
+    std::vector<WORD> indices;
+    vertices.reserve((stacks + 1) * (slices + 1));
+    indices.reserve(stacks * slices * 6);
+
+    for (int stack = 0; stack <= stacks; ++stack)
+    {
+        float v = (float)stack / (float)stacks;
+        float phi = v * XM_PI;
+        float y = cosf(phi);
+        float r = sinf(phi);
+
+        for (int slice = 0; slice <= slices; ++slice)
+        {
+            float u = (float)slice / (float)slices;
+            float theta = u * XM_2PI;
+
+            float x = r * cosf(theta);
+            float z = r * sinf(theta);
+
+            Vertex vert{};
+            vert.pos[0] = radius * x;
+            vert.pos[1] = radius * y;
+            vert.pos[2] = radius * z;
+
+            vert.normal[0] = x;
+            vert.normal[1] = y;
+            vert.normal[2] = z;
+
+            vert.color[0] = 1.0f;
+            vert.color[1] = 1.0f;
+            vert.color[2] = 1.0f;
+            vert.color[3] = 1.0f;
+
+            vertices.push_back(vert);
+        }
+    }
+
+    auto idx = [slices](int stack, int slice) -> WORD {
+        return (WORD)(stack * (slices + 1) + slice);
+    };
+
+    for (int stack = 0; stack < stacks; ++stack)
+    {
+        for (int slice = 0; slice < slices; ++slice)
+        {
+            WORD i0 = idx(stack, slice);
+            WORD i1 = idx(stack + 1, slice);
+            WORD i2 = idx(stack + 1, slice + 1);
+            WORD i3 = idx(stack, slice + 1);
+
+            indices.push_back(i0); indices.push_back(i1); indices.push_back(i2);
+            indices.push_back(i0); indices.push_back(i2); indices.push_back(i3);
+        }
+    }
+
+    m_skyboxIndexCount = (UINT)indices.size();
+
+    // Вершинный буфер
+    D3D11_BUFFER_DESC vbDesc = {};
+    vbDesc.ByteWidth = (UINT)(sizeof(Vertex) * vertices.size());
+    vbDesc.Usage = D3D11_USAGE_DEFAULT;
+    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA vbData = {};
+    vbData.pSysMem = vertices.data();
+
+    HRESULT hr = m_device->CreateBuffer(&vbDesc, &vbData, &m_skyboxVertexBuffer);
+    if (FAILED(hr)) return hr;
+
+    // Индексный буфер
+    D3D11_BUFFER_DESC ibDesc = {};
+    ibDesc.ByteWidth = (UINT)(sizeof(WORD) * indices.size());
+    ibDesc.Usage = D3D11_USAGE_DEFAULT;
+    ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+    D3D11_SUBRESOURCE_DATA ibData = {};
+    ibData.pSysMem = indices.data();
+
+    hr = m_device->CreateBuffer(&ibDesc, &ibData, &m_skyboxIndexBuffer);
+    if (FAILED(hr)) return hr;
+
+    // Компиляция шейдеров
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+    #ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+    #endif
+
+    ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
+
+    // Вершинный шейдер
+    hr = D3DCompileFromFile(L"Skybox.vs", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "vs_5_0", flags, 0, &vsBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции Skybox.vs\n");
+        return hr;
+    }
+
+    hr = m_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &m_skyboxVS);
+    if (FAILED(hr)) return hr;
+
+    // Пиксельный шейдер
+    hr = D3DCompileFromFile(L"Skybox.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, &errBlob);
+    if (FAILED(hr))
+    {
+        if (errBlob) OutputDebugStringA((char*)errBlob->GetBufferPointer());
+        OutputDebugString(L"Ошибка компиляции Skybox.ps\n");
+        return hr;
+    }
+
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_skyboxPS);
+    if (FAILED(hr)) return hr;
+
+    // Input layout (такой же как для основной геометрии)
+    D3D11_INPUT_ELEMENT_DESC layout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+
+    hr = m_device->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_skyboxInputLayout);
+    if (FAILED(hr)) return hr;
+
+    return S_OK;
+}
+
+void Render::DrawSkybox()
+{
+    if (!m_skyboxVS || !m_skyboxPS) return;
+
+    // Используем HDRI cubemap если доступен, иначе процедурный
+    ID3D11ShaderResourceView* envToUse = m_hdriCubemapSRV ? m_hdriCubemapSRV.Get() : m_envSRV.Get();
+    if (!envToUse) return;
+
+    // Отключаем depth write для skybox (но оставляем depth test)
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = TRUE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; // не пишем в depth
+    dsDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    dsDesc.StencilEnable = FALSE;
+
+    ComPtr<ID3D11DepthStencilState> dsState;
+    m_device->CreateDepthStencilState(&dsDesc, &dsState);
+    m_context->OMSetDepthStencilState(dsState.Get(), 0);
+
+    // Отключаем culling
+    D3D11_RASTERIZER_DESC rsDesc = {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_NONE;
+    rsDesc.FrontCounterClockwise = FALSE;
+    rsDesc.DepthClipEnable = TRUE;
+
+    ComPtr<ID3D11RasterizerState> rsState;
+    m_device->CreateRasterizerState(&rsDesc, &rsState);
+    m_context->RSSetState(rsState.Get());
+
+    // Настройка pipeline
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_skyboxVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetIndexBuffer(m_skyboxIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_context->IASetInputLayout(m_skyboxInputLayout.Get());
+
+    m_context->VSSetShader(m_skyboxVS.Get(), nullptr, 0);
+    m_context->VSSetConstantBuffers(0, 1, m_worldBuffer.GetAddressOf());
+    m_context->VSSetConstantBuffers(1, 1, m_viewProjBuffer.GetAddressOf());
+
+    m_context->PSSetShader(m_skyboxPS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, &envToUse);
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+
+    m_context->DrawIndexed(m_skyboxIndexCount, 0, 0);
+
+    // Очистка
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    m_context->PSSetShaderResources(0, 1, &nullSRV);
+
+    // Восстанавливаем нормальное depth state
+    m_context->OMSetDepthStencilState(nullptr, 0);
+    m_context->RSSetState(nullptr);
+}
+
+
 void Render::DrawEnvironmentToCurrentTarget()
 {
-    if (!m_environmentPS || !m_envSRV) return;
+    if (!m_environmentPS) return;
+
+    // Используем HDRI cubemap если доступен, иначе процедурный
+    ID3D11ShaderResourceView* envToUse = m_hdriCubemapSRV ? m_hdriCubemapSRV.Get() : m_envSRV.Get();
+    if (!envToUse) return;
 
     // Draw fullscreen quad with cubemap sampled by view ray.
     m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
     m_context->PSSetShader(m_environmentPS.Get(), nullptr, 0);
-    m_context->PSSetShaderResources(0, 1, m_envSRV.GetAddressOf());
+    m_context->PSSetShaderResources(0, 1, &envToUse);
     m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
     m_context->PSSetConstantBuffers(1, 1, m_viewProjBuffer.GetAddressOf());
 

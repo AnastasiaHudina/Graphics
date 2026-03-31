@@ -19,6 +19,10 @@ cbuffer FrameConstants : register(b1)
     float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
+// IBL: Irradiance cubemap
+TextureCube<float4> IrradianceMap : register(t1);
+SamplerState LinearSampler : register(s0);
+
 struct PSIn
 {
     float4 position : SV_Position;
@@ -65,6 +69,20 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
     return clamp(F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
 }
 
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    cosTheta = clamp(cosTheta, 0.0f, 1.0f);
+    float3 maxReflection = max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0);
+    return clamp(F0 + (maxReflection - F0) * pow(1.0f - cosTheta, 5.0f), 0.0f, 1.0f);
+}
+
+float ComputePointLightFalloff(float distanceToLight, float range)
+{
+    float invDist2 = 1.0f / max(distanceToLight * distanceToLight, 1e-4f);
+    float rangeFade = saturate(1.0f - pow(distanceToLight / max(range, 1e-4f), 4.0f));
+    return invDist2 * rangeFade * rangeFade;
+}
+
 float4 main(PSIn input) : SV_Target0
 {
     float viewMode = cameraPosAndMode.w;
@@ -97,8 +115,7 @@ float4 main(PSIn input) : SV_Target0
         float dist = length(Lvec);
         float3 L = (dist > 1e-5f) ? (Lvec / dist) : float3(0, 1, 0);
 
-        float attenuation = 1.0f / max(dist * dist, 1e-4f);
-        attenuation = clamp(attenuation, 0.0f, 1.0f);
+        float attenuation = ComputePointLightFalloff(dist, 6.0f);
 
         float3 radiance = lightColor[i].rgb * lightColor[i].a * attenuation;
 
@@ -146,7 +163,32 @@ float4 main(PSIn input) : SV_Target0
         return float4(f, 1.0f);
     }
 
-    float3 ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+    // IBL: Ambient diffuse от irradiance map
+    float3 ambientTerm;
+
+    // Fresnel для окружающего освещения с учётом roughness
+    float3 F_ambient = FresnelSchlickRoughness(max(dot(N, V), 0.0f), F0, roughness);
+    float3 kS_ambient = F_ambient;
+    float3 kD_ambient = (1.0f - kS_ambient) * (1.0f - metalness);
+
+    // Сэмплирование irradiance map по нормали
+    float3 irradiance = IrradianceMap.Sample(LinearSampler, N).rgb;
+    irradiance = clamp(irradiance, 0.0f, 1e6f);
+
+    // Diffuse IBL
+    float3 diffuseIBL = kD_ambient * albedo * irradiance;
+
+    // Если irradiance map недоступна, используем простой ambient
+    // (проверка на нулевое значение)
+    if (dot(irradiance, irradiance) < 1e-6f)
+    {
+        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+    }
+    else
+    {
+        ambientTerm = diffuseIBL;
+    }
+
     float3 color = ambientTerm + Lo;
     color = clamp(color, 0.0f, 1e6f);
     return float4(color, 1.0f);
