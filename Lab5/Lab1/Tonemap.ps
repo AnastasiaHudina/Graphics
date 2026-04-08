@@ -1,0 +1,42 @@
+Texture2D hdrTexture : register(t0);
+SamplerState linearSampler : register(s0);
+
+cbuffer ToneMapCB : register(b0)
+{
+    float4 Params;
+};
+
+static const float WhiteLumen = 11.2f;
+static const float lumMin = 0.0001f;
+static const float lumMax = 1000.0f;
+
+float3 Uncharted2Tonemap(float3 x)
+{
+    static const float A = 0.10f;
+    static const float B = 0.50f;
+    static const float C = 0.10f;
+    static const float D = 0.20f;
+    static const float E = 0.02f;
+    static const float F = 0.30f;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+float GetExposure()
+{
+    float avgLog = Params.x;
+    float avgLum = exp(avgLog) - 1.0;
+    avgLum = clamp(avgLum, lumMin, lumMax);
+    float keyValue = 1.03f - 2.0f / (2.0f + log10(avgLum + 1.0f));
+    return keyValue / avgLum;
+}
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    float3 color = hdrTexture.Sample(linearSampler, texcoord).rgb;
+    float exposure = GetExposure();
+    float3 toneMapped = Uncharted2Tonemap(color * exposure);
+    float3 whiteScale = 1.0f / Uncharted2Tonemap(float3(WhiteLumen, WhiteLumen, WhiteLumen));
+
+    float3 ldr = saturate(toneMapped * whiteScale);
+    return float4(ldr, 1.0f);
+}

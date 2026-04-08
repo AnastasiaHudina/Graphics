@@ -1,0 +1,12 @@
+Texture2D<float4> HDRTexture : register(t0);
+SamplerState LinearSampler : register(s0);
+
+static const float3 LuminanceWeights = float3(0.2126f, 0.7151f, 0.0722f);
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    float3 hdrColor = HDRTexture.Sample(LinearSampler, texcoord).rgb;
+    float luminance = dot(hdrColor, LuminanceWeights);
+    float logLum = log(luminance + 1.0f);
+    return float4(logLum, logLum, logLum, 1.0f);
+}
