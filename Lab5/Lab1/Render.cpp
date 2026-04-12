@@ -188,6 +188,17 @@ HRESULT Render::Initialize(HWND hwnd)
             {
                 OutputDebugString(L"CreatePrefilteredMap succeeded\n");
             }
+
+            // ---- BRDF LUT (необходим для specular IBL) ----
+            hr = CreateBRDFLUT();
+            if (FAILED(hr))
+            {
+                OutputDebugString(L"Warning: CreateBRDFLUT failed, specular IBL will be incomplete\n");
+            }
+            else
+            {
+                OutputDebugString(L"CreateBRDFLUT succeeded\n");
+            }
         }
     }
 
@@ -252,6 +263,11 @@ void Render::Shutdown()
     m_prefilteredSRV.Reset();
     m_prefilteredCubemap.Reset();
     m_prefilterPS.Reset();
+
+    m_brdfSRV.Reset();
+    m_brdfLUT.Reset();
+    m_brdfPS.Reset();
+    m_brdfSampler.Reset();
 
     // Skybox
     m_skyboxVertexBuffer.Reset();
@@ -2357,6 +2373,125 @@ HRESULT Render::CreatePrefilteredMap()
     m_context->RSSetViewports(1, &vpFull);
 
     OutputDebugString(L"CreatePrefilteredMap completed successfully\n");
+    return S_OK;
+}
+
+HRESULT Render::CreateBRDFLUT()
+{
+    const UINT lutSize = 512; // размер LUT текстуры
+
+    // Создание 2D текстуры формата R32G32_FLOAT
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = lutSize;
+    desc.Height = lutSize;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &m_brdfLUT);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"CreateBRDFLUT: failed to create texture\n");
+        return hr;
+    }
+
+    // SRV для BRDF LUT
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    hr = m_device->CreateShaderResourceView(m_brdfLUT.Get(), &srvDesc, &m_brdfSRV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"CreateBRDFLUT: failed to create SRV\n");
+        return hr;
+    }
+
+    // Загрузка пиксельного шейдера BRDF.cso
+    ComPtr<ID3DBlob> psBlob;
+    hr = D3DReadFileToBlob(L"BRDF.cso", &psBlob);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"CreateBRDFLUT: failed to load BRDF.cso\n");
+        return hr;
+    }
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_brdfPS);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"CreateBRDFLUT: failed to create pixel shader\n");
+        return hr;
+    }
+
+    // Создание sampler с CLAMP адресацией
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    hr = m_device->CreateSamplerState(&sampDesc, &m_brdfSampler);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"CreateBRDFLUT: failed to create sampler\n");
+        return hr;
+    }
+
+    // Сохраняем старые состояния
+    ComPtr<ID3D11RenderTargetView> oldRTV;
+    ComPtr<ID3D11DepthStencilView> oldDSV;
+    m_context->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    ComPtr<ID3D11VertexShader> oldVS;
+    ComPtr<ID3D11PixelShader> oldPS;
+    ComPtr<ID3D11InputLayout> oldLayout;
+    m_context->VSGetShader(&oldVS, nullptr, nullptr);
+    m_context->PSGetShader(&oldPS, nullptr, nullptr);
+    m_context->IAGetInputLayout(&oldLayout);
+
+    D3D11_VIEWPORT oldVP = {};
+    UINT numVP = 1;
+    m_context->RSGetViewports(&numVP, &oldVP);
+
+    // Создаём RTV для BRDF текстуры
+    ComPtr<ID3D11RenderTargetView> rtv;
+    hr = m_device->CreateRenderTargetView(m_brdfLUT.Get(), nullptr, &rtv);
+    if (FAILED(hr)) return hr;
+
+    // Устанавливаем RTV и viewport
+    m_context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+    D3D11_VIEWPORT vp = { 0, 0, (float)lutSize, (float)lutSize, 0, 1 };
+    m_context->RSSetViewports(1, &vp);
+
+    // Очистка (необязательно)
+    float clearColor[4] = { 0, 0, 0, 0 };
+    m_context->ClearRenderTargetView(rtv.Get(), clearColor);
+
+    // Настройка fullscreen quad
+    UINT stride = sizeof(QuadVertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetInputLayout(m_quadInputLayout.Get());
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
+    m_context->PSSetShader(m_brdfPS.Get(), nullptr, 0);
+
+    // Рисуем quad
+    m_context->Draw(4, 0);
+
+    // Восстановление старых состояний
+    m_context->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
+    m_context->VSSetShader(oldVS.Get(), nullptr, 0);
+    m_context->PSSetShader(oldPS.Get(), nullptr, 0);
+    m_context->IASetInputLayout(oldLayout.Get());
+    m_context->RSSetViewports(1, &oldVP);
+
+    OutputDebugString(L"CreateBRDFLUT completed successfully\n");
     return S_OK;
 }
 

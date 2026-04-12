@@ -123,5 +123,8 @@
     <FxCompile Include="Skybox.ps" />
     <FxCompile Include="Skybox.vs" />
     <FxCompile Include="Tonemap.ps" />
+    <FxCompile Include="BRDF.ps">
+      <Filter>Шейдеры</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

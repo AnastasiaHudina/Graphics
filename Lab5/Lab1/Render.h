@@ -128,6 +128,13 @@ private:
     HRESULT ConvertEquirectToCubemap();
     HRESULT ComputeIrradianceMap();
 
+    // BRDF LUT для specular IBL
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_brdfLUT;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_brdfSRV;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_brdfPS;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> m_brdfSampler;
+
+    HRESULT CreateBRDFLUT();
 
     // Skybox
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_skyboxVertexBuffer;
