@@ -43,7 +43,7 @@ float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness)
     float3 tangent = normalize(cross(up, N));
     float3 bitangent = cross(N, tangent);
 
-    float3 sampleVec = tangent * H.x + bitangent * H.z + N * H.y;
+    float3 sampleVec = tangent * H.x - bitangent * H.z + N * H.y;
     return normalize(sampleVec);
 }
 
