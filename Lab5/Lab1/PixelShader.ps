@@ -10,6 +10,7 @@ cbuffer MaterialBuffer : register(b3)
 {
     float4 baseColor;     // rgb in 0..1
     float4 roughMetalPad; // x=roughness, y=metalness
+    float4 emissive;      // rgb = emissiveColor, a = emissiveIntensity
 };
 
 cbuffer FrameConstants : register(b1)
@@ -190,6 +191,7 @@ float4 main(PSIn input) : SV_Target0
     }
 
     float3 color = ambientTerm + Lo;
+    color += emissive.rgb * emissive.a;
     color = clamp(color, 0.0f, 1e6f);
     return float4(color, 1.0f);
 }

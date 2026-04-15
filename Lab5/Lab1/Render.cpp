@@ -50,6 +50,7 @@ struct MaterialBufferData
 {
     DirectX::XMFLOAT4 baseColor;     // rgb
     DirectX::XMFLOAT4 roughMetalPad; // x=roughness, y=metalness
+    DirectX::XMFLOAT4 emissive;      // rgb = emissiveColor, a = emissiveIntensity
 };
 
 Render::Render()
@@ -151,6 +152,8 @@ HRESULT Render::Initialize(HWND hwnd)
     if (FAILED(hr)) return hr;
     hr = CreateDownsampleChain(width, height);
     if (FAILED(hr)) return hr;
+    hr = CreateBloomTargets(width, height);
+    if (FAILED(hr)) return hr;
 
     hr = CreateEnvironmentResources();
     if (FAILED(hr)) return hr;
@@ -226,6 +229,17 @@ void Render::Shutdown()
     m_hdrTexture.Reset();
     m_hdrRTV.Reset();
     m_hdrSRV.Reset();
+
+    // Bloom
+    m_bloomTexA.Reset();
+    m_bloomRTV_A.Reset();
+    m_bloomSRV_A.Reset();
+    m_bloomTexB.Reset();
+    m_bloomRTV_B.Reset();
+    m_bloomSRV_B.Reset();
+    m_bloomExtractPS.Reset();
+    m_bloomBlurPS.Reset();
+    m_bloomCB.Reset();
 
     // Очистка цепочки downsampling
     m_downsampleChain.clear(); 
@@ -778,6 +792,7 @@ void Render::DrawScene()
         // Пост-обработка: вычисление яркости и tone mapping
         ComputeAverageLuminance();
 
+        ApplyBloom();
         ApplyTonemap();
     }
 
@@ -801,6 +816,13 @@ void Render::DrawScene()
         ImGui::ColorEdit3("Base color", (float*)&m_baseColor);
         ImGui::SliderFloat("Roughness", &m_roughness, 0.0f, 1.0f);
         ImGui::SliderFloat("Metalness", &m_metalness, 0.0f, 1.0f);
+        ImGui::ColorEdit3("Emissive color", (float*)&m_emissiveColor);
+        ImGui::SliderFloat("Emissive intensity", &m_emissiveIntensity, 0.0f, 50.0f);
+        ImGui::Separator();
+        ImGui::Checkbox("Bloom enabled", &m_bloomEnabled);
+        ImGui::SliderFloat("Bloom threshold", &m_bloomThreshold, 0.0f, 10.0f);
+        ImGui::SliderFloat("Bloom strength", &m_bloomStrength, 0.0f, 1.0f);
+        ImGui::SliderInt("Bloom iterations", &m_bloomIterations, 1, 12);
         ImGui::End();
 
         ImGui::Begin("Light Intensity");
@@ -916,6 +938,7 @@ void Render::UpdateTransforms()
     MaterialBufferData mat{};
     mat.baseColor = XMFLOAT4(m_baseColor.x, m_baseColor.y, m_baseColor.z, 1.0f);
     mat.roughMetalPad = XMFLOAT4(r, m, 0.0f, 0.0f);
+    mat.emissive = XMFLOAT4(m_emissiveColor.x, m_emissiveColor.y, m_emissiveColor.z, m_emissiveIntensity);
     if (SUCCEEDED(m_context->Map(m_materialBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
         memcpy(mapped.pData, &mat, sizeof(mat));
@@ -939,6 +962,13 @@ void Render::HandleResize(HWND hwnd)
     m_hdrSRV.Reset();
     m_downsampleChain.clear();
     m_luminanceStaging.Reset();
+
+    m_bloomTexA.Reset();
+    m_bloomRTV_A.Reset();
+    m_bloomSRV_A.Reset();
+    m_bloomTexB.Reset();
+    m_bloomRTV_B.Reset();
+    m_bloomSRV_B.Reset();
 
     // Изменение размера swap chain
     RECT rect;
@@ -980,6 +1010,13 @@ void Render::HandleResize(HWND hwnd)
     if (FAILED(hr))
     {
         OutputDebugString(L"Ошибка пересоздания Downsample Chain\n");
+        return;
+    }
+
+    hr = CreateBloomTargets(width, height);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"Ошибка пересоздания Bloom targets\n");
         return;
     }
 }
@@ -1161,6 +1198,40 @@ HRESULT Render::CreateDownsampleChain(UINT width, UINT height)
     return S_OK;
 }
 
+HRESULT Render::CreateBloomTargets(UINT width, UINT height)
+{
+    // Half-res bloom buffers
+    UINT bw = max(1u, width / 2);
+    UINT bh = max(1u, height / 2);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = bw;
+    desc.Height = bh;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &m_bloomTexA);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreateRenderTargetView(m_bloomTexA.Get(), nullptr, &m_bloomRTV_A);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreateShaderResourceView(m_bloomTexA.Get(), nullptr, &m_bloomSRV_A);
+    if (FAILED(hr)) return hr;
+
+    hr = m_device->CreateTexture2D(&desc, nullptr, &m_bloomTexB);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreateRenderTargetView(m_bloomTexB.Get(), nullptr, &m_bloomRTV_B);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreateShaderResourceView(m_bloomTexB.Get(), nullptr, &m_bloomSRV_B);
+    if (FAILED(hr)) return hr;
+
+    return S_OK;
+}
+
 HRESULT Render::CreateQuadResources()
 {
     // Компиляция вершинного шейдера для quad
@@ -1238,6 +1309,20 @@ HRESULT Render::CreatePostprocessShaders()
     hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_tonemapPS);
     if (FAILED(hr)) return hr;
 
+    // Bloom extract shader
+    hr = D3DCompileFromFile(L"BloomExtract.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, nullptr);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_bloomExtractPS);
+    if (FAILED(hr)) return hr;
+
+    // Bloom blur shader
+    hr = D3DCompileFromFile(L"BloomBlur.ps", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main", "ps_5_0", flags, 0, &psBlob, nullptr);
+    if (FAILED(hr)) return hr;
+    hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_bloomBlurPS);
+    if (FAILED(hr)) return hr;
+
     // Линейный сэмплер
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1257,6 +1342,11 @@ HRESULT Render::CreatePostprocessShaders()
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_tonemapCB);
+    if (FAILED(hr)) return hr;
+
+    // Bloom constants buffer
+    cbDesc.ByteWidth = sizeof(BloomConstants);
+    hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_bloomCB);
     if (FAILED(hr)) return hr;
 
     return S_OK;
@@ -1378,6 +1468,107 @@ void Render::ComputeAverageLuminance()
     m_context->RSSetViewports(1, &oldVP);
 }
 
+void Render::ApplyBloom()
+{
+    if (!m_bloomEnabled || !m_hdrSRV || !m_bloomExtractPS || !m_bloomBlurPS || !m_bloomCB || !m_bloomTexA || !m_bloomTexB)
+        return;
+
+    // Save current RT/DS and viewport
+    ComPtr<ID3D11RenderTargetView> oldRTV;
+    ComPtr<ID3D11DepthStencilView> oldDSV;
+    m_context->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    D3D11_VIEWPORT oldVP = {};
+    UINT numVP = 1;
+    m_context->RSGetViewports(&numVP, &oldVP);
+
+    // Disable depth
+    D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable = FALSE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dsDesc.StencilEnable = FALSE;
+    ComPtr<ID3D11DepthStencilState> noDepthState;
+    m_device->CreateDepthStencilState(&dsDesc, &noDepthState);
+    m_context->OMSetDepthStencilState(noDepthState.Get(), 0);
+
+    // Fullscreen quad
+    UINT stride = sizeof(QuadVertex);
+    UINT offset = 0;
+    m_context->IASetVertexBuffers(0, 1, m_quadVertexBuffer.GetAddressOf(), &stride, &offset);
+    m_context->IASetInputLayout(m_quadInputLayout.Get());
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+
+    D3D11_TEXTURE2D_DESC td{};
+    m_bloomTexA->GetDesc(&td);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)td.Width;
+    vp.Height = (float)td.Height;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
+
+    auto updateBloomCB = [&](float dirX, float dirY)
+    {
+        BloomConstants bc{};
+        bc.Params0 = XMFLOAT4(m_bloomThreshold, 1.0f / max(1u, td.Width), 1.0f / max(1u, td.Height), 0.0f);
+        bc.Params1 = XMFLOAT4(dirX, dirY, 0.0f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE map{};
+        if (SUCCEEDED(m_context->Map(m_bloomCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
+        {
+            memcpy(map.pData, &bc, sizeof(bc));
+            m_context->Unmap(m_bloomCB.Get(), 0);
+        }
+        m_context->PSSetConstantBuffers(1, 1, m_bloomCB.GetAddressOf());
+    };
+
+    // Extract HDR -> A
+    updateBloomCB(0.0f, 0.0f);
+    m_context->OMSetRenderTargets(1, m_bloomRTV_A.GetAddressOf(), nullptr);
+    m_context->PSSetShader(m_bloomExtractPS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
+    m_context->Draw(4, 0);
+    {
+        ID3D11ShaderResourceView* nullSRV = nullptr;
+        m_context->PSSetShaderResources(0, 1, &nullSRV);
+    }
+
+    int iters = m_bloomIterations;
+    if (iters < 1) iters = 1;
+    if (iters > 16) iters = 16;
+
+    for (int i = 0; i < iters; ++i)
+    {
+        // Horizontal: A -> B
+        updateBloomCB(1.0f, 0.0f);
+        m_context->OMSetRenderTargets(1, m_bloomRTV_B.GetAddressOf(), nullptr);
+        m_context->PSSetShader(m_bloomBlurPS.Get(), nullptr, 0);
+        m_context->PSSetShaderResources(0, 1, m_bloomSRV_A.GetAddressOf());
+        m_context->Draw(4, 0);
+        {
+            ID3D11ShaderResourceView* nullSRV = nullptr;
+            m_context->PSSetShaderResources(0, 1, &nullSRV);
+        }
+
+        // Vertical: B -> A
+        updateBloomCB(0.0f, 1.0f);
+        m_context->OMSetRenderTargets(1, m_bloomRTV_A.GetAddressOf(), nullptr);
+        m_context->PSSetShader(m_bloomBlurPS.Get(), nullptr, 0);
+        m_context->PSSetShaderResources(0, 1, m_bloomSRV_B.GetAddressOf());
+        m_context->Draw(4, 0);
+        {
+            ID3D11ShaderResourceView* nullSRV = nullptr;
+            m_context->PSSetShaderResources(0, 1, &nullSRV);
+        }
+    }
+
+    // Restore
+    m_context->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
+    m_context->OMSetDepthStencilState(nullptr, 0);
+    m_context->RSSetViewports(1, &oldVP);
+}
+
 void Render::ApplyTonemap()
 {
     if (!m_hdrSRV || !m_tonemapPS || !m_tonemapCB) return;
@@ -1401,6 +1592,8 @@ void Render::ApplyTonemap()
     m_context->VSSetShader(m_quadVS.Get(), nullptr, 0);
     m_context->PSSetShader(m_tonemapPS.Get(), nullptr, 0);
     m_context->PSSetShaderResources(0, 1, m_hdrSRV.GetAddressOf());
+    if (m_bloomEnabled && m_bloomSRV_A)
+        m_context->PSSetShaderResources(1, 1, m_bloomSRV_A.GetAddressOf());
     m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
     // Передаём adapted luminance в шейдер (как в референсе)
@@ -1408,15 +1601,15 @@ void Render::ApplyTonemap()
     if (SUCCEEDED(m_context->Map(m_tonemapCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMap)))
     {
         TonemapConstants* cb = (TonemapConstants*)cbMap.pData;
-        cb->Params = XMFLOAT4(m_adaptedLuminance, 0, 0, 0);
+        cb->Params = XMFLOAT4(m_adaptedLuminance, (m_bloomEnabled ? m_bloomStrength : 0.0f), 0, 0);
         m_context->Unmap(m_tonemapCB.Get(), 0);
     }
     m_context->PSSetConstantBuffers(0, 1, m_tonemapCB.GetAddressOf());
 
     m_context->Draw(4, 0);
 
-    ID3D11ShaderResourceView* nullSRV = nullptr;
-    m_context->PSSetShaderResources(0, 1, &nullSRV);
+    ID3D11ShaderResourceView* nullSRVs[2] = { nullptr, nullptr };
+    m_context->PSSetShaderResources(0, 2, nullSRVs);
 }
 
 HRESULT Render::CreateEnvironmentResources()

@@ -48,6 +48,7 @@ private:
     HRESULT LoadShaders();
     void UpdateTransforms();
     void SetDebugNames();
+    void GetFaceCorners(UINT face, DirectX::XMVECTOR(&corners)[4]);
 
     bool m_autoRotate;         // true - вращается, false - остановлен
     bool m_imguiInitialized = false;
@@ -96,6 +97,8 @@ private:
     DirectX::XMFLOAT3 m_baseColor = DirectX::XMFLOAT3(0.9f, 0.7f, 0.2f);
     float m_roughness = 0.35f;
     float m_metalness = 0.0f;
+    DirectX::XMFLOAT3 m_emissiveColor = DirectX::XMFLOAT3(1.0f, 1.0f, 1.0f);
+    float m_emissiveIntensity = 0.0f;
     int m_viewMode = 0;
 
     // Environment (cubemap) background
@@ -175,22 +178,46 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_brightnessPS;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_copyPS;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_tonemapPS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_bloomExtractPS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_bloomBlurPS;
 
     // Сэмплер с линейной фильтрацией
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_linearSampler;
 
     // Константный буфер для tone mapping
     struct TonemapConstants {
-        DirectX::XMFLOAT4 Params; // x = adaptedLuminance
+        DirectX::XMFLOAT4 Params; // x = adaptedLuminance(log), y = bloomStrength
     };
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_tonemapCB;
+
+    // Bloom targets (half-res)
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_bloomTexA;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_bloomRTV_A;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_bloomSRV_A;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_bloomTexB;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_bloomRTV_B;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_bloomSRV_B;
+
+    // Bloom params
+    bool m_bloomEnabled = true;
+    float m_bloomThreshold = 1.0f;
+    float m_bloomStrength = 0.08f;
+    int m_bloomIterations = 6;
+
+    struct BloomConstants {
+        DirectX::XMFLOAT4 Params0; // x=threshold, y=texelSizeX, z=texelSizeY, w=unused
+        DirectX::XMFLOAT4 Params1; // x=dirX, y=dirY, z=unused, w=unused
+    };
+    Microsoft::WRL::ComPtr<ID3D11Buffer> m_bloomCB;
 
     // Вспомогательные функции
     HRESULT CreateHDRTarget(UINT width, UINT height);
     HRESULT CreateDownsampleChain(UINT width, UINT height);
     HRESULT CreateQuadResources();
     HRESULT CreatePostprocessShaders();
+    HRESULT CreateBloomTargets(UINT width, UINT height);
     void ComputeAverageLuminance();
+    void ApplyBloom();
     void ApplyTonemap();
     void DrawEnvironmentToCurrentTarget();
 
