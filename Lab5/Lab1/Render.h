@@ -128,6 +128,13 @@ private:
     HRESULT ConvertEquirectToCubemap();
     HRESULT ComputeIrradianceMap();
 
+    // BRDF LUT для specular IBL
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_brdfLUT;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_brdfSRV;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> m_brdfPS;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> m_brdfSampler;
+
+    HRESULT CreateBRDFLUT();
 
     // Skybox
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_skyboxVertexBuffer;
@@ -186,11 +193,20 @@ private:
     void ComputeAverageLuminance();
     void ApplyTonemap();
     void DrawEnvironmentToCurrentTarget();
+    // Вспомогательная функция для получения углов грани cubemap
+    void GetFaceCorners(UINT face, DirectX::XMVECTOR(&corners)[4]);
 
     struct QuadVertex
     {
         float x, y, z;  // позиция
         float u, v;     // текстурные координаты
+    };
+
+    // Структура вершины для рендеринга граней cubemap
+    struct PrefilterVertex
+    {
+        float pos[3];
+        float uv[2];
     };
 
     float m_adaptedLuminance;
