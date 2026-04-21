@@ -48,6 +48,7 @@ private:
     HRESULT LoadShaders();
     void UpdateTransforms();
     void SetDebugNames();
+    void GetFaceCorners(UINT face, DirectX::XMVECTOR(&corners)[4]);
 
     bool m_autoRotate;         // true - вращается, false - остановлен
     bool m_imguiInitialized = false;
