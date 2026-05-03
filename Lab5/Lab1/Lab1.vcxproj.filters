@@ -99,44 +99,32 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
-    <CopyFileToFolders Include="PixelShader.ps">
+    <None Include="pathway_morning_4k.hdr" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="PixelShader.ps">
       <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="VertexShader.vs">
+    </FxCompile>
+    <FxCompile Include="Prefilter.ps">
       <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Environment.ps">
+    </FxCompile>
+    <FxCompile Include="Environment.ps">
       <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Tonemap.ps">
+    </FxCompile>
+    <FxCompile Include="Brightness.ps" />
+    <FxCompile Include="VertexShader.vs">
       <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Copy.ps">
+    </FxCompile>
+    <FxCompile Include="Copy.ps" />
+    <FxCompile Include="CubemapFace.vs" />
+    <FxCompile Include="EquirectToCubemap.ps" />
+    <FxCompile Include="Irradiance.ps" />
+    <FxCompile Include="QuadVS.vs" />
+    <FxCompile Include="Skybox.ps" />
+    <FxCompile Include="Skybox.vs" />
+    <FxCompile Include="Tonemap.ps" />
+    <FxCompile Include="BRDF.ps">
       <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Brightness.ps">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="QuadVS.vs">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="pathway_morning_4k.hdr">
-      <Filter>Файлы ресурсов</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Skybox.ps">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Skybox.vs">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="CubemapFace.vs">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="EquirectToCubemap.ps">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="Irradiance.ps">
-      <Filter>Шейдеры</Filter>
-    </CopyFileToFolders>
+    </FxCompile>
   </ItemGroup>
 </Project>

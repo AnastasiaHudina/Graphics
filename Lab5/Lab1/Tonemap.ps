@@ -1,4 +1,5 @@
 Texture2D hdrTexture : register(t0);
+Texture2D bloomTexture : register(t1);
 SamplerState linearSampler : register(s0);
 
 cbuffer ToneMapCB : register(b0)
@@ -33,6 +34,12 @@ float GetExposure()
 float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
     float3 color = hdrTexture.Sample(linearSampler, texcoord).rgb;
+    float bloomStrength = Params.y;
+    if (bloomStrength > 0.0f)
+    {
+        float3 bloom = bloomTexture.Sample(linearSampler, texcoord).rgb;
+        color += bloom * bloomStrength;
+    }
     float exposure = GetExposure();
     float3 toneMapped = Uncharted2Tonemap(color * exposure);
     float3 whiteScale = 1.0f / Uncharted2Tonemap(float3(WhiteLumen, WhiteLumen, WhiteLumen));

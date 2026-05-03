@@ -11,7 +11,6 @@ float4 main(float4 svPos : SV_Position, float3 worldPos : POSITION) : SV_Target
     float3 wPos = normalize(worldPos);
 
     // Преобразуем направление в UV-координаты equirectangular карты
-    // Используем формулу из эталонного решения для правильной ориентации
     float2 t_sample = float2(
         1.0f - atan2(wPos.z, wPos.x) / (2.0f * PI),
         1.0f - (0.5f + asin(wPos.y) / PI)

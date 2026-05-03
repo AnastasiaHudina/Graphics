@@ -35,7 +35,7 @@ float4 main(float4 svPos : SV_Position, float3 worldPos : POSITION) : SV_Target
             float3 a = float3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
 
             // Преобразование из касательного пространства в мировое
-            float3 t_sample = a.x * tangent + a.y * binormal + a.z * normal;
+            float3 t_sample = a.x * tangent - a.y * binormal + a.z * normal;
 
             // Сэмплирование cubemap
             irradiance += EnvCubemap.Sample(LinearSampler, t_sample) * cos(theta) * sin(theta);

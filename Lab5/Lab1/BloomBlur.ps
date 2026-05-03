@@ -1,0 +1,35 @@
+Texture2D<float4> InputTexture : register(t0);
+SamplerState LinearSampler : register(s0);
+
+cbuffer BloomCB : register(b1)
+{
+    float4 Params0; // x=threshold, y=texelSizeX, z=texelSizeY, w=unused
+    float4 Params1; // x=dirX, y=dirY, z=unused, w=unused
+};
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    float2 texel = float2(Params0.y, Params0.z);
+    float2 dir = normalize(Params1.xy + 1e-6f);
+    float2 stepUV = dir * texel;
+
+    // 9-tap Gaussian (approx)
+    float w0 = 0.227027f;
+    float w1 = 0.1945946f;
+    float w2 = 0.1216216f;
+    float w3 = 0.054054f;
+    float w4 = 0.016216f;
+
+    float3 c = InputTexture.Sample(LinearSampler, texcoord).rgb * w0;
+    c += InputTexture.Sample(LinearSampler, texcoord + stepUV * 1.0f).rgb * w1;
+    c += InputTexture.Sample(LinearSampler, texcoord - stepUV * 1.0f).rgb * w1;
+    c += InputTexture.Sample(LinearSampler, texcoord + stepUV * 2.0f).rgb * w2;
+    c += InputTexture.Sample(LinearSampler, texcoord - stepUV * 2.0f).rgb * w2;
+    c += InputTexture.Sample(LinearSampler, texcoord + stepUV * 3.0f).rgb * w3;
+    c += InputTexture.Sample(LinearSampler, texcoord - stepUV * 3.0f).rgb * w3;
+    c += InputTexture.Sample(LinearSampler, texcoord + stepUV * 4.0f).rgb * w4;
+    c += InputTexture.Sample(LinearSampler, texcoord - stepUV * 4.0f).rgb * w4;
+
+    return float4(c, 1.0f);
+}
+
