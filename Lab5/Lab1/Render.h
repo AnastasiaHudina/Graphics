@@ -194,8 +194,6 @@ private:
     void ComputeAverageLuminance();
     void ApplyTonemap();
     void DrawEnvironmentToCurrentTarget();
-    // Вспомогательная функция для получения углов грани cubemap
-    void GetFaceCorners(UINT face, DirectX::XMVECTOR(&corners)[4]);
 
     struct QuadVertex
     {
