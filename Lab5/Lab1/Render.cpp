@@ -711,12 +711,20 @@ void Render::DrawScene()
     m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
     m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
 
-    // Установка IBL ресурсов (irradiance map)
-    if (m_irradianceSRV)
+    // Установка IBL ресурсов.
+    // Всегда привязываем валидные cubemap SRV, чтобы shader resource slots не оставались пустыми
+    // и debug layer не ругался на draw call.
+    ID3D11ShaderResourceView* envIBL = m_hdriCubemapSRV ? m_hdriCubemapSRV.Get() : m_envSRV.Get();
+    ID3D11ShaderResourceView* irradianceIBL = m_irradianceSRV ? m_irradianceSRV.Get() : envIBL;
+    if (irradianceIBL)
     {
-        m_context->PSSetShaderResources(1, 1, m_irradianceSRV.GetAddressOf());
-        m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+        m_context->PSSetShaderResources(1, 1, &irradianceIBL);
     }
+    if (envIBL)
+    {
+        m_context->PSSetShaderResources(2, 1, &envIBL);
+    }
+    m_context->PSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
     if (m_annotation) m_annotation->BeginEvent(L"DrawCube");
     // Sphere indices count = buffer size / sizeof(WORD) computed from CreateGeometry
@@ -725,6 +733,9 @@ void Render::DrawScene()
     UINT indexCount = ibd.ByteWidth / sizeof(WORD);
     m_context->DrawIndexed(indexCount, 0, 0);
     if (m_annotation) m_annotation->EndEvent();
+
+    ID3D11ShaderResourceView* nullIBL[2] = { nullptr, nullptr };
+    m_context->PSSetShaderResources(1, 2, nullIBL);
 
     if (!debugNoTonemap)
     {
@@ -1303,17 +1314,14 @@ void Render::ComputeAverageLuminance()
         float logLum = ((float*)mapped.pData)[0];
         m_context->Unmap(m_luminanceStaging.Get(), 0);
 
-        float avgLum = expf(logLum) - 1.0f;
-        if (avgLum < 0.001f) avgLum = 0.001f;
-
         auto now = std::chrono::steady_clock::now();
         float deltaTime = std::chrono::duration<float>(now - m_lastFrameTime).count();
         m_lastFrameTime = now;
         if (deltaTime > 0.1f) deltaTime = 0.1f;
 
         float expGain = 1.0f - expf(-deltaTime / m_eyeAdaptationSpeed);
-        m_adaptedLuminance += (avgLum - m_adaptedLuminance) * expGain;
-        if (m_adaptedLuminance < 0.001f) m_adaptedLuminance = 0.001f;
+        m_adaptedLuminance += (logLum - m_adaptedLuminance) * expGain;
+        if (m_adaptedLuminance < 0.0f) m_adaptedLuminance = 0.0f;
 
         // Обновляем debug-значение экспозиции (как в шейдере: exp(adapted) - 1)
         float shaderLum = expf(m_adaptedLuminance) - 1.0f;

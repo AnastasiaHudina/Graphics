@@ -19,8 +19,9 @@ cbuffer FrameConstants : register(b1)
     float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
-// IBL: Irradiance cubemap
+// IBL resources
 TextureCube<float4> IrradianceMap : register(t1);
+TextureCube<float4> EnvironmentMap : register(t2);
 SamplerState LinearSampler : register(s0);
 
 struct PSIn
@@ -163,7 +164,7 @@ float4 main(PSIn input) : SV_Target0
         return float4(f, 1.0f);
     }
 
-    // IBL: Ambient diffuse от irradiance map
+    // IBL: ambient diffuse + simple ambient specular
     float3 ambientTerm;
 
     // Fresnel для окружающего освещения с учётом roughness
@@ -178,15 +179,23 @@ float4 main(PSIn input) : SV_Target0
     // Diffuse IBL
     float3 diffuseIBL = kD_ambient * albedo * irradiance;
 
+    // Простая ambient specular составляющая по environment cubemap.
+    // Даже без prefiltered mip chain это даёт заметную разницу между металлом и диэлектриком.
+    float3 R = reflect(-V, N);
+    float3 specularEnv = EnvironmentMap.Sample(LinearSampler, R).rgb;
+    specularEnv = clamp(specularEnv, 0.0f, 1e6f);
+    float specularScale = lerp(1.0f, 0.25f, roughness);
+    float3 specularIBL = specularEnv * F_ambient * specularScale;
+
     // Если irradiance map недоступна, используем простой ambient
     // (проверка на нулевое значение)
     if (dot(irradiance, irradiance) < 1e-6f)
     {
-        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo + specularIBL;
     }
     else
     {
-        ambientTerm = diffuseIBL;
+        ambientTerm = diffuseIBL + specularIBL;
     }
 
     float3 color = ambientTerm + Lo;

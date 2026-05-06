@@ -1,0 +1,20 @@
+Texture2D<float4> InputTexture : register(t0);
+SamplerState LinearSampler : register(s0);
+
+float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
+{
+    uint w, h;
+    InputTexture.GetDimensions(w, h);
+
+    float2 texel = 1.0f / float2(max(w, 1u), max(h, 1u));
+
+    float2 uv = saturate(texcoord);
+
+    float s0 = InputTexture.Sample(LinearSampler, saturate(uv + texel * float2(-0.5f, -0.5f))).r;
+    float s1 = InputTexture.Sample(LinearSampler, saturate(uv + texel * float2( 0.5f, -0.5f))).r;
+    float s2 = InputTexture.Sample(LinearSampler, saturate(uv + texel * float2(-0.5f,  0.5f))).r;
+    float s3 = InputTexture.Sample(LinearSampler, saturate(uv + texel * float2( 0.5f,  0.5f))).r;
+
+    float avg = 0.25f * (s0 + s1 + s2 + s3);
+    return float4(avg, avg, avg, 1.0f);
+}
