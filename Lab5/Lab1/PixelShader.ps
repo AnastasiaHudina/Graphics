@@ -19,14 +19,10 @@ cbuffer FrameConstants : register(b1)
     float4 cameraPosAndMode; // xyz = camera pos, w = view mode
 };
 
-// IBL: Irradiance cubemap
+// IBL resources
 TextureCube<float4> IrradianceMap : register(t1);
+TextureCube<float4> EnvironmentMap : register(t2);
 SamplerState LinearSampler : register(s0);
-
-// Specular IBL: prefiltered cubemap и BRDF LUT
-TextureCube<float4> PrefilteredMap : register(t2);
-Texture2D<float2> BRDFLUT : register(t3);
-SamplerState ClampSampler : register(s1);   // сэмплер с CLAMP для BRDF LUT
 
 struct PSIn
 {
@@ -95,8 +91,6 @@ float4 main(PSIn input) : SV_Target0
     float3 N = normalize(input.normal);
     float3 P = input.worldPos.xyz;
     float3 V = normalize(cameraPosAndMode.xyz - P);
-
-    float NdotV = clamp(dot(N, V), 0.0f, 1.0f);
 
     float roughness = clamp(roughMetalPad.x, 0.0f, 1.0f);
     float metalness = clamp(roughMetalPad.y, 0.0f, 1.0f);
@@ -170,34 +164,41 @@ float4 main(PSIn input) : SV_Target0
         return float4(f, 1.0f);
     }
 
-        // IBL: Diffuse + Specular 
-    float3 F_ambient = FresnelSchlickRoughness(NdotV, F0, roughness);
+    // IBL: ambient diffuse + simple ambient specular
+    float3 ambientTerm;
+
+    // Fresnel для окружающего освещения с учётом roughness
+    float3 F_ambient = FresnelSchlickRoughness(max(dot(N, V), 0.0f), F0, roughness);
     float3 kS_ambient = F_ambient;
     float3 kD_ambient = (1.0f - kS_ambient) * (1.0f - metalness);
 
-    // Diffuse IBL (irradiance)
+    // Сэмплирование irradiance map по нормали
     float3 irradiance = IrradianceMap.Sample(LinearSampler, N).rgb;
     irradiance = clamp(irradiance, 0.0f, 1e6f);
+
+    // Diffuse IBL
     float3 diffuseIBL = kD_ambient * albedo * irradiance;
 
-    // Specular IBL (prefiltered map + BRDF LUT)
-    float3 R = reflect(V, N);
-    const float MAX_LOD = 4.0; // 5 mip-levels: 0..4
-    float mipLevel = roughness * MAX_LOD;
-    float3 prefilteredColor = PrefilteredMap.SampleLevel(LinearSampler, R, mipLevel).rgb;
-    float2 brdf = BRDFLUT.Sample(ClampSampler, float2(NdotV, roughness));
-    float3 specularIBL = prefilteredColor * (F0 * brdf.x + brdf.y);
+    // Простая ambient specular составляющая по environment cubemap.
+    // Даже без prefiltered mip chain это даёт заметную разницу между металлом и диэлектриком.
+    float3 R = reflect(-V, N);
+    float3 specularEnv = EnvironmentMap.Sample(LinearSampler, R).rgb;
+    specularEnv = clamp(specularEnv, 0.0f, 1e6f);
+    float specularScale = lerp(1.0f, 0.25f, roughness);
+    float3 specularIBL = specularEnv * F_ambient * specularScale;
 
-    float3 ambientTerm = diffuseIBL + specularIBL;
-
-    // Fallback: если irradiance map недоступна (например, не загрузилась)
+    // Если irradiance map недоступна, используем простой ambient
+    // (проверка на нулевое значение)
     if (dot(irradiance, irradiance) < 1e-6f)
     {
-        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo;
+        ambientTerm = clamp(ambient.rgb, 0.0f, 1.0f) * albedo + specularIBL;
+    }
+    else
+    {
+        ambientTerm = diffuseIBL + specularIBL;
     }
 
     float3 color = ambientTerm + Lo;
-
     color = clamp(color, 0.0f, 1e6f);
     return float4(color, 1.0f);
 }
